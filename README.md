@@ -1,55 +1,96 @@
-# AlignmentForge
+# AlignmentForge — phylogenomic alignment & trimming studio
 
-AlignmentForge is a visual software tool for biology. You use it to explore, filter, trim, and curate phylogenomic alignments.
+AlignmentForge is an interactive visual software tool for exploring, filtering, trimming, and curating multilocus phylogenomic alignments.
 
-## Access the Software
+You can inspect sequences, filter them by quality, trim ends, and easily select the best data for your phylogenetic analysis directly in the browser or on your desktop.
 
-You can use AlignmentForge in two ways: as a web application or as a desktop application.
+**[▶ Try it in your browser](https://phyloforge.github.io/AlignmentForge/)** —
+no installation, works with any alignment folder.
 
-### Use the Web Application
+---
 
-1. Open your internet browser.
-2. Go to the GitHub Pages link for this repository.
-3. Use the interface to upload and analyze your alignment files.
+## Running it
 
-*Note: Some features that need local file access might not operate in the web application.*
+There are two ways to run AlignmentForge. They are the same application. Use the one you prefer.
 
-### Use the Desktop Application
+| | Use when |
+|---|---|
+| [1. In a browser](#1-in-a-browser) | Simplest. Nothing to install, works on any OS |
+| [2. As a desktop app](#2-as-a-desktop-app) | You want full local filesystem access, offline capability, and maximum performance |
 
-The desktop application operates on Windows, macOS, and Linux. It gives you full access to all features.
+### 1. In a browser
 
-1. Go to the **Releases** page of this repository.
-2. Download the installer file for your operating system.
-3. Install the software on your computer.
-4. Open the AlignmentForge application.
+Open **<https://phyloforge.github.io/AlignmentForge/>**. Click the folder icon to open a directory, then select a folder on your computer that contains alignment files.
 
-## How to Build the Software
+AlignmentForge uploads nothing. The page reads the folder locally on your machine through the browser's file picker. Your data stays entirely on your device.
 
-If you want to build the software from the source code, follow these steps.
+### 2. As a desktop app
 
-### Prerequisites
+Download the installer for your operating system (macOS, Windows, or Linux) from the [latest release](https://github.com/PhyloForge/AlignmentForge/releases/latest).
 
-You must install these tools on your computer:
-* Node.js (version 20 or higher)
-* Rust (latest stable version)
+The desktop app gives you complete, unrestricted access to your local filesystem. It can seamlessly read massive folders and write your filtered output datasets back to disk without prompting you for browser permissions.
 
-### Build Steps
+---
 
-1. Open a terminal window.
-2. Clone this repository to your computer.
-3. Type `npm install` and press Enter. This command installs the necessary dependencies.
-4. Type `npm run dev` and press Enter. This command starts the development server.
-5. Type `npm run tauri dev` and press Enter. This command starts the desktop application in development mode.
+## Try it with the example datasets
 
-To build the final desktop application, type `npm run tauri build` and press Enter.
+You do not need your own alignments to see how AlignmentForge works. This repository ships with several real datasets so you can try out the software right away.
 
-## Features
+### Exon-only alignments
 
-* **Explore Data**: See your sequence alignments in a visual grid.
-* **Filter Sequences**: Remove sequences that do not meet your quality rules.
-* **Trim Alignments**: Cut the ends of alignments to remove bad data.
-* **Curate Data**: Select the best data for your phylogenetic analysis.
+`example_data/exons/` — Ten exon-only phylip alignment files for frog phylogenomics.
 
-## License
+| Get it | How |
+|---|---|
+| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/exons) | See the sample files |
+| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `example_data/exons/` is inside it |
 
-Please refer to the LICENSE file in this repository.
+### UCE alignments
+
+`example_data/uces/` — Ten Ultraconserved Element (UCE) alignments for testing.
+
+| Get it | How |
+|---|---|
+| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/uces) | See the sample files |
+| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `example_data/uces/` is inside it |
+
+### All markers combined
+
+`example_data/all_markers/` — A mix of different marker types in a single folder. 
+
+| Get it | How |
+|---|---|
+| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/all_markers) | See the sample files |
+| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `example_data/all_markers/` is inside it |
+
+### Loading an example on your machine
+
+1. Download or clone this repository:
+```bash
+git clone https://github.com/PhyloForge/AlignmentForge.git
+```
+2. Open AlignmentForge (either the web or desktop version).
+3. Click to open a folder.
+4. Select `AlignmentForge/example_data/exons` or one of the other example folders.
+
+---
+
+## What to load into AlignmentForge
+
+Load any directory on your computer containing alignment files. 
+
+AlignmentForge currently natively supports standard formats. Once a directory is selected, the application will scan it, calculate summary statistics, and present a visual catalog of all your loci.
+
+You can then apply filters, trim alignments, inspect the alignment matrix view, and export your curated dataset!
+
+---
+
+## Development
+
+If you want to build the software from source:
+
+1. Install **Node.js** (v20+) and **Rust**.
+2. Clone this repository.
+3. Run `npm install` to install dependencies.
+4. Run `npm run dev` to start the browser development server.
+5. Run `npm run tauri dev` to start the desktop development application.
