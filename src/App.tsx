@@ -131,7 +131,7 @@ export const App: React.FC = () => {
     orf_min_segment_aa: 35,
     orf_min_coding_score: 40.0,
     exclude_uce: true,
-    fail_if_no_orf: true,
+    fail_if_no_orf: false,
     orf_use_references: false,
     orf_reference_sequences: {},
     trim_external: true,

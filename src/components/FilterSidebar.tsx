@@ -139,7 +139,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
         enable_orf: true,
         trim_columns: false,
         enable_statistical_columns: false,
-        fail_if_no_orf: true,
+        fail_if_no_orf: false,
       });
     } else {
       onChangeRecipe({

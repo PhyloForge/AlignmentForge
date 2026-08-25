@@ -9,9 +9,9 @@ AlignmentForge is an interactive visual software tool for exploring, filtering, 
 ## Interfaces
 
 <p align="center">
-  <img src="public/screenshot_1.png" alt="General Catalog" width="48%">
+  <img src="public/screenshot_2.png" alt="General Catalog" width="48%">
   &nbsp;
-  <img src="public/screenshot_2.png" alt="Sequence Alignment" width="48%">
+  <img src="public/screenshot_1.png" alt="Sequence Alignment" width="48%">
 </p>
 <p align="center">
   <em>Left: The General Catalog interface displaying an overview of sequences and projects. Right: The detailed Sequence Alignment view showing the nucleotide matrix.</em>
