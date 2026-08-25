@@ -50,3 +50,4 @@ jobs:
           releaseBody: 'Release for AlignmentForge.'
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || '' }}
