@@ -398,10 +398,10 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
                   </td>
                   <td className="py-2 px-3 font-mono text-[#8b949e]">{item.num_taxa}</td>
                   <td className="py-2 px-3 font-mono">{item.length.toLocaleString()} bp</td>
-                  <td className="py-2 px-3 font-mono text-cyan-400">
+                  <td className="py-2 px-3 font-mono">
                     {item.variable_count ?? 0} ({Number(item.variable_percent ?? 0).toFixed(1)}%)
                   </td>
-                  <td className="py-2 px-3 font-mono font-medium text-orange-400">
+                  <td className="py-2 px-3 font-mono">
                     {item.pis_count} ({Number(item.pis_percent ?? 0).toFixed(1)}%)
                   </td>
                   <td className="py-2 px-3 font-mono">
