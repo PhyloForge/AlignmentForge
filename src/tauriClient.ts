@@ -149,7 +149,7 @@ export async function scanDirectory(dirPath: string): Promise<ScanResponse> {
   } else {
     if (clientAlignmentsCache.size > 0) {
       const aligns = Array.from(clientAlignmentsCache.values());
-      return buildScanResponseFromAlignments(aligns, defaultRecipe);
+      return await buildScanResponseFromAlignments(aligns, defaultRecipe);
     }
     return {
       summaries: [],
@@ -220,7 +220,9 @@ export async function loadDirectoryFromFiles(
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
 
-  const scanResponse = buildScanResponseFromAlignments(parsedAlignments, recipe);
+  const scanResponse = await buildScanResponseFromAlignments(parsedAlignments, recipe, 0, (pct) => {
+    if (onProgress) onProgress(total * (pct / 100), total, 'Computing summaries...');
+  });
   return { dirName, scanResponse };
 }
 
@@ -464,6 +466,8 @@ export async function loadDirectoryFromUrl(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
-  const scanResponse = buildScanResponseFromAlignments(parsedAlignments, recipe);
+  const scanResponse = await buildScanResponseFromAlignments(parsedAlignments, recipe, 0, (pct) => {
+    if (onProgress) onProgress(total * (pct / 100), total, 'Computing summaries...');
+  });
   return { dirName, scanResponse };
 }

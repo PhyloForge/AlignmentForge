@@ -1168,15 +1168,24 @@ export function recipeWithDatasetSampleFilter(
   return { ...recipe, excluded_taxa: excludedTaxa };
 }
 
-export function buildScanResponseFromAlignments(
+export async function buildScanResponseFromAlignments(
   alignments: Alignment[],
   recipe: TrimmingRecipe,
-  totalDatasetTaxa: number = 0
-): ScanResponse {
+  totalDatasetTaxa: number = 0,
+  onProgress?: (percent: number) => void
+): Promise<ScanResponse> {
   const uniqueTaxa = new Set(alignments.flatMap((alignment) => alignment.taxa)).size;
   const assessmentTaxa = totalDatasetTaxa > 0 ? totalDatasetTaxa : uniqueTaxa;
   const runtimeRecipe = recipeWithDatasetSampleFilter(recipe, alignments);
-  const summaries = alignments.map((a) => computeAlignmentSummary(a, runtimeRecipe, assessmentTaxa));
+  
+  const summaries: AlignmentSummary[] = [];
+  for (let i = 0; i < alignments.length; i++) {
+    summaries.push(computeAlignmentSummary(alignments[i], runtimeRecipe, assessmentTaxa));
+    if (i % 20 === 0) {
+      if (onProgress) onProgress(90 + (i / alignments.length) * 9.9);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
   const totalLoci = summaries.length;
 
   // Taxa occupancy map
