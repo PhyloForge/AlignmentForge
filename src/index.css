@@ -1,0 +1,127 @@
+
+:root.dark {
+  --bg: #0e1014;
+  --panel: #14171d;
+  --panel2: #171b22;
+  --panel3: #1b2029;
+  --input: #1f242e;
+  --border: #232833;
+  --border2: #2d3545;
+  --text: #c9d1d9;
+  --text-bright: #dce6ff;
+  --muted: #8b949e;
+  --muted2: #6e7681;
+}
+
+:root:not(.dark) {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --panel2: #f1f5f9;
+  --panel3: #e2e8f0;
+  --input: #cbd5e1;
+  --border: #e2e8f0;
+  --border2: #cbd5e1;
+  --text: #334155;
+  --text-bright: #0f172a;
+  --muted: #64748b;
+  --muted2: #94a3b8;
+}
+
+/* Force light mode overrides on the hardcoded Tailwind utility classes */
+:root:not(.dark) .bg-\[\#0e1014\] { background-color: var(--bg) !important; }
+:root:not(.dark) .bg-\[\#14171d\] { background-color: var(--panel) !important; }
+:root:not(.dark) .bg-\[\#171b22\] { background-color: var(--panel2) !important; }
+:root:not(.dark) .bg-\[\#171b22\]\/70 { background-color: rgba(241, 245, 249, 0.7) !important; }
+:root:not(.dark) .bg-\[\#1b2029\] { background-color: var(--panel3) !important; }
+:root:not(.dark) .bg-\[\#1b2029\]\/80 { background-color: rgba(226, 232, 240, 0.8) !important; }
+:root:not(.dark) .bg-\[\#1b2029\]\/60 { background-color: rgba(226, 232, 240, 0.6) !important; }
+:root:not(.dark) .bg-\[\#1f242e\] { background-color: var(--input) !important; }
+:root:not(.dark) .bg-\[\#1f242e\]\/30 { background-color: rgba(203, 213, 225, 0.3) !important; }
+
+:root:not(.dark) .border-\[\#232833\] { border-color: var(--border) !important; }
+:root:not(.dark) .border-\[\#2d3545\] { border-color: var(--border2) !important; }
+:root:not(.dark) .border-\[\#2d3545\]\/50 { border-color: rgba(203, 213, 225, 0.5) !important; }
+
+:root:not(.dark) .text-\[\#c9d1d9\] { color: var(--text) !important; }
+:root:not(.dark) .text-\[\#dce6ff\] { color: var(--text-bright) !important; }
+:root:not(.dark) .text-\[\#8b949e\] { color: var(--muted) !important; }
+:root:not(.dark) .text-\[\#6e7681\] { color: var(--muted2) !important; }
+
+/* Let's also handle fill colors for SVGs */
+:root:not(.dark) .fill-\[\#14171d\] { fill: var(--panel) !important; }
+
+/* Scrollbars for light mode */
+:root:not(.dark) ::-webkit-scrollbar-track {
+  background: var(--panel2);
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb {
+  background: var(--input);
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: var(--muted2);
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root, :root.dark {
+  --bg: #0e1014;
+  --panel: #14171d;
+  --panel2: #171b22;
+  --border: #232833;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #3b82f6;
+}
+
+:root:not(.dark) {
+  --bg: #f8fafc;
+  --panel: #f1f5f9;
+  --panel2: #e2e8f0;
+  --border: #cbd5e1;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0e1014;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #232833;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #374151;
+}
+
+/* Compact rails can still scroll on narrow windows without a scrollbar
+   displacing their controls or changing the toolbar height. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

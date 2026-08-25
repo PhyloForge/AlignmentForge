@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for AlignmentForge desktop app","local":true,"windows":["main","*"],"permissions":["core:default","core:app:default","core:window:default","core:webview:default","core:path:default","core:event:default","dialog:default","dialog:allow-open","dialog:allow-save","fs:default","opener:default"]}}

@@ -1,0 +1,21 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.env
+.env.*
+
+# Tauri
+src-tauri/target/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Test data / scripts
+test_data/
+test_hmm/
+test_replace/
+*.cjs
+*.R
+*.rs
