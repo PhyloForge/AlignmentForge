@@ -424,7 +424,12 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
                     {Number(item.gc_percent ?? 0).toFixed(1)}%
                   </td>
                   <td className="py-2 px-3 font-mono text-[11px]">
-                    {orfEnabled && skipNonCodingOrf && shouldSkipOrfLocus(item.id, orfSearchMode) ? (
+                    {isProcessing && orfEnabled ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-cyan-300 font-medium">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Processing</span>
+                      </span>
+                    ) : orfEnabled && skipNonCodingOrf && shouldSkipOrfLocus(item.id, orfSearchMode) ? (
                       <span className="text-[#6e7681]">Skipped</span>
                     ) : item.orf_evaluated ? (
                       item.orf_candidate_found && item.orf_valid ? (

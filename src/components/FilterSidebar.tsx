@@ -865,15 +865,6 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                     </>
                   )}
 
-                  <label className="flex items-center justify-between cursor-pointer text-[11px]">
-                    <span className="text-[#c9d1d9]">Fail Locus When No Valid Candidate</span>
-                    <input
-                      type="checkbox"
-                      checked={recipe.fail_if_no_orf ?? true}
-                      onChange={(e) => update('fail_if_no_orf', e.target.checked)}
-                      className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500 focus:ring-0"
-                    />
-                  </label>
 
                   <label className="flex items-center justify-between cursor-pointer text-[11px]">
                     <span className="text-[#c9d1d9]">Auto-Flip Reverse Strand Exons</span>

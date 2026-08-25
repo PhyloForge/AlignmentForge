@@ -78,7 +78,12 @@ impl Default for OrfConfig {
             min_segment_aa: 35,
             min_coding_score: 40.0,
             exclude_uce: true,
-            fail_if_no_orf: true, max_stop_codons_sample: 2, max_stop_codons_locus: 5, macse_trim_terminal: true, macse_max_internal_sample: 3, macse_max_internal_locus: 10,
+            fail_if_no_orf: true, 
+            max_stop_codons_sample: 2,
+            max_stop_codons_locus: 5,
+            macse_trim_terminal: true,
+            macse_max_internal_sample: 3,
+            macse_max_internal_locus: 10,
         }
     }
 }
@@ -1162,7 +1167,7 @@ mod tests {
             min_segment_aa: 3,
             min_coding_score: 0.0,
             exclude_uce: false,
-            fail_if_no_orf: false, max_stop_codons_sample: 2, max_stop_codons_locus: 5, macse_trim_terminal: true, macse_max_internal_sample: 3, macse_max_internal_locus: 10,
+            fail_if_no_orf: false, 
             max_stop_codons_sample: 2,
             max_stop_codons_locus: 5,
             macse_trim_terminal: true,
@@ -1193,7 +1198,7 @@ mod tests {
             min_segment_aa: 3,
             min_coding_score: 0.0,
             exclude_uce: true,
-            fail_if_no_orf: false, max_stop_codons_sample: 2, max_stop_codons_locus: 5, macse_trim_terminal: true, macse_max_internal_sample: 3, macse_max_internal_locus: 10,
+            fail_if_no_orf: false, 
         };
 
         for locus_id in [
@@ -1247,7 +1252,7 @@ mod tests {
             min_segment_aa: 2,
             min_coding_score: 0.0,
             exclude_uce: true,
-            fail_if_no_orf: true, max_stop_codons_sample: 2, max_stop_codons_locus: 5, macse_trim_terminal: true, macse_max_internal_sample: 3, macse_max_internal_locus: 10,
+            fail_if_no_orf: true, 
         };
 
         let result =
@@ -1290,7 +1295,7 @@ mod tests {
             min_segment_aa: 35,
             min_coding_score: 40.0,
             exclude_uce: false,
-            fail_if_no_orf: true, max_stop_codons_sample: 2, max_stop_codons_locus: 5, macse_trim_terminal: true, macse_max_internal_sample: 3, macse_max_internal_locus: 10,
+            fail_if_no_orf: true, 
         };
 
         let de_novo = optimize_open_reading_frames(&taxa, &sequences, "exon", &config);
@@ -1355,7 +1360,7 @@ mod tests {
             min_segment_aa: 75,
             min_coding_score: 40.0,
             exclude_uce: false,
-            fail_if_no_orf: true, max_stop_codons_sample: 2, max_stop_codons_locus: 5, macse_trim_terminal: true, macse_max_internal_sample: 3, macse_max_internal_locus: 10,
+            fail_if_no_orf: true, 
         };
 
         let result = optimize_open_reading_frames(&taxa, &seqs, "exon_stop_free", &config);

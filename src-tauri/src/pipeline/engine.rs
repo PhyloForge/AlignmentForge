@@ -690,45 +690,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
 
     if is_coding_with_orf {
         let has_internal_stop = final_stop_codons.iter().any(|stop| !stop.is_terminal);
-        if recipe.fail_if_no_orf
-            && (!found_valid_orf || new_taxa_count == 0 || has_internal_stop)
-        {
-            let reason = if reference_blocks_orf {
-                "Reference-guided exon failed: no matching reference sequence could be anchored for this locus"
-                    .to_string()
-            } else if orf_evaluated && !orf_candidate_found {
-                if matches!(
-                    recipe.orf_search_mode,
-                    OrfSearchMode::ContinuousCds | OrfSearchMode::ReferenceGuided
-                ) {
-                    "Candidate ORF failed: no usable continuous reading frame was found".to_string()
-                } else {
-                    format!(
-                        "Candidate ORF failed: no segment met {:.0}% support and {} aa minimums",
-                        recipe.orf_min_shared_support_percent, recipe.orf_min_segment_aa
-                    )
-                }
-            } else if orf_frame.is_some_and(|frame| frame < 0) && !recipe.auto_flip_reverse {
-                "Candidate ORF failed: the best candidate is reverse-strand but Auto-Flip Reverse Strand is disabled"
-                    .to_string()
-            } else if orf_evaluated
-                && orf_candidate_found
-                && matches!(
-                    recipe.orf_search_mode,
-                    OrfSearchMode::BestSharedSegment | OrfSearchMode::ReferenceCandidateOrf
-                )
-                && orf_coding_score < recipe.orf_min_coding_score
-            {
-                format!(
-                    "Candidate ORF failed: coding evidence {:.1} < minimum {:.1}",
-                    orf_coding_score, recipe.orf_min_coding_score
-                )
-            } else {
-                "Candidate ORF failed: no retained samples or premature stop codons remain"
-                    .to_string()
-            };
-            fail_reasons.push(reason);
-        }
+
     }
 
     if recipe.assess_alignment {
