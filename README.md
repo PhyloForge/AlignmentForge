@@ -4,7 +4,7 @@ AlignmentForge is an interactive visual software tool for exploring, filtering, 
 
 You can inspect sequences, filter them by quality, trim ends, and easily select the best data for your phylogenetic analysis directly in the browser or on your desktop.
 
-**[▶ Try it in your browser](https://phyloforge.github.io/AlignmentForge/?run=example_data/all_markers)** —
+**[▶ Try it in your browser](https://phyloforge.github.io/AlignmentForge/?run=example_data)** —
 no installation, with example data.
 
 ---
