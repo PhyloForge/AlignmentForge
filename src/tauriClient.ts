@@ -444,7 +444,8 @@ export async function loadDirectoryFromUrl(
         const res = await fetch(fileUrl);
         if (!res.ok) throw new Error(`Failed to fetch ${fileName}`);
         const text = await res.text();
-        const align = parseAlignmentText(text, fileName, fileName);
+        const baseName = fileName.split('/').pop() || fileName;
+        const align = parseAlignmentText(text, baseName, fileName);
         parsedAlignments.push(align);
         clientAlignmentsCache.set(align.file_path, align);
       } catch (e) {
