@@ -131,13 +131,13 @@ export function OrfAnalysisSidebar({
                       onChange={(event) => update('orf_search_mode', event.target.value as OrfSearchMode)}
                       className="w-full bg-[#1b2029] border border-[#2d3545] rounded px-2 py-1 text-xs text-[#c9d1d9] outline-none"
                     >
-                      <option value="heuristic">Heuristic Length/Stop Search</option>
-                      <option value="bestsharedsegment">Best Shared Segment (Coding Loci)</option>
                       <option value="continuouscds">Continuous CDS (Whole alignment)</option>
-                      <option value="referencecandidateorf" disabled={!recipe.orf_use_references || refCount === 0}>Reference-Guided (Requires FASTA)</option>
+                      <option value="bestsharedsegment">Candidate ORF Extraction (Heuristic/Shared Segment)</option>
+                      <option value="referenceguided" disabled={!recipe.orf_use_references || refCount === 0}>Reference-Guided CDS (Requires FASTA)</option>
+                      <option value="referencecandidateorf" disabled={!recipe.orf_use_references || refCount === 0}>Reference-Guided Candidate ORF (Requires FASTA)</option>
                     </select>
                     <p className="mt-2 text-[10px] leading-snug text-[#8b949e]">
-                      Sets the method for locating reading frames. Heuristic rapidly checks length and start/stop rules. Continuous CDS assumes the whole alignment is coding. Reference-guided uses your provided sequences.
+                      Sets the method for locating reading frames. Heuristic/Candidate extraction rapidly checks length and start/stop rules. Continuous CDS assumes the whole alignment is coding. Reference-guided uses your provided sequences.
                     </p>
                   </div>
                   
