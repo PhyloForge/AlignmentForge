@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Hide TypeScript frontend files from GitHub's language statistics
+# so that Rust is highlighted as the primary language.
+src/**/*.ts linguist-vendored
+src/**/*.tsx linguist-vendored
