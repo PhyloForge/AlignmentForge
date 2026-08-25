@@ -237,6 +237,32 @@ export const App: React.FC = () => {
           unlisten = unsub;
         });
       });
+    } else {
+      // Browser environment: Check if ?run= is in URL for auto-loading
+      const urlParams = new URLSearchParams(window.location.search);
+      const runParam = urlParams.get('run');
+      if (runParam) {
+        import('./tauriClient').then(({ loadDirectoryFromUrl }) => {
+          setIsLoading(true);
+          setLoadingProgress(null);
+          loadDirectoryFromUrl(runParam, processingRecipe, (cur, tot, file) => {
+            setLoadingProgress({ current: cur, total: tot, percent: (cur / tot) * 100, fileName: file });
+          }).then(({ dirName, scanResponse }) => {
+            setCurrentPath(dirName);
+            setSummaries(scanResponse.summaries);
+            rawSummariesRef.current = scanResponse.summaries;
+            setOverview(scanResponse.overview);
+            setOccupancy(scanResponse.occupancy);
+            setReferenceRevision((r) => r + 1);
+            setIsLoading(false);
+            setLoadingProgress(null);
+          }).catch(err => {
+            console.error('Failed to load example from URL:', err);
+            setIsLoading(false);
+            setLoadingProgress(null);
+          });
+        });
+      }
     }
 
     return () => {

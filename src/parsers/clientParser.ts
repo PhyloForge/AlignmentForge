@@ -659,17 +659,28 @@ function calculateClientSiteStatistics(sequences: string[]): ClientSiteStatistic
   let variableCount = 0;
   let pisCount = 0;
   const pisMask = new Array<boolean>(length).fill(false);
+  const numSeqs = sequences.length;
 
   for (let column = 0; column < length; column++) {
-    const states: Record<string, number> = {};
-    for (const sequence of sequences) {
-      const state = resolvedNucleotideState(sequence[column]);
-      if (state) {
-        states[state] = (states[state] || 0) + 1;
-      }
+    let countA = 0, countC = 0, countG = 0, countT = 0;
+    for (let i = 0; i < numSeqs; i++) {
+      const char = sequences[i][column];
+      if (char === 'A' || char === 'a') countA++;
+      else if (char === 'C' || char === 'c') countC++;
+      else if (char === 'G' || char === 'g') countG++;
+      else if (char === 'T' || char === 't' || char === 'U' || char === 'u') countT++;
     }
-    if (Object.keys(states).length >= 2) variableCount++;
-    if (Object.values(states).filter((stateCount) => stateCount >= 2).length >= 2) {
+    
+    let diffStates = 0;
+    let repeatedStates = 0;
+    
+    if (countA > 0) { diffStates++; if (countA >= 2) repeatedStates++; }
+    if (countC > 0) { diffStates++; if (countC >= 2) repeatedStates++; }
+    if (countG > 0) { diffStates++; if (countG >= 2) repeatedStates++; }
+    if (countT > 0) { diffStates++; if (countT >= 2) repeatedStates++; }
+    
+    if (diffStates >= 2) variableCount++;
+    if (repeatedStates >= 2) {
       pisCount++;
       pisMask[column] = true;
     }
@@ -904,14 +915,11 @@ export function computeAlignmentSummary(
   const rawNumTaxa = rawAlign.taxa.length;
   const rawLength = rawAlign.length;
 
-  let rawTotalChars = 0;
+  let rawTotalChars = rawNumTaxa * rawLength;
   let rawGapCount = 0;
   for (const seq of rawAlign.sequences) {
-    for (let i = 0; i < seq.length; i++) {
-      rawTotalChars++;
-      const c = seq[i].toUpperCase();
-      if (c === '-' || c === '?' || c === 'N') rawGapCount++;
-    }
+    const gaps = (seq.match(/[-?Nn]/g) || []).length;
+    rawGapCount += gaps;
   }
   const rawGapPercent = rawTotalChars > 0 ? (rawGapCount / rawTotalChars) * 100 : 0;
 
@@ -1177,10 +1185,7 @@ export function buildScanResponseFromAlignments(
     for (let i = 0; i < align.taxa.length; i++) {
       const taxon = align.taxa[i];
       const seq = align.sequences[i] || '';
-      let gaps = 0;
-      for (const ch of seq) {
-        if (ch === '-' || ch === '?' || ch === 'N' || ch === 'n') gaps++;
-      }
+      const gaps = (seq.match(/[-?Nn]/g) || []).length;
       const bp = seq.length - gaps;
       const gapPct = seq.length > 0 ? (gaps / seq.length) * 100 : 100;
 

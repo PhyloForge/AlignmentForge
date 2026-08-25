@@ -410,3 +410,59 @@ const defaultRecipe: TrimmingRecipe = {
   min_variable_count: 0,
   min_variable_percent: 0.0,
 };
+
+export async function loadDirectoryFromUrl(
+  urlPath: string,
+  recipe: TrimmingRecipe,
+  onProgress?: (current: number, total: number, fileName: string) => void
+): Promise<{ dirName: string; scanResponse: ScanResponse }> {
+  clientAlignmentsCache.clear();
+  
+  // Fetch manifest
+  const manifestUrl = `${urlPath}/manifest.json`;
+  const response = await fetch(manifestUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch manifest from ${manifestUrl}`);
+  }
+  
+  const files: string[] = await response.json();
+  if (!files || files.length === 0) {
+    throw new Error('No files found in manifest.');
+  }
+
+  let dirName = urlPath.split('/').filter(Boolean).pop() || 'Example Alignments';
+  const parsedAlignments: Alignment[] = [];
+  const BATCH_SIZE = 10;
+  const total = files.length;
+
+  for (let i = 0; i < total; i += BATCH_SIZE) {
+    const chunk = files.slice(i, i + BATCH_SIZE);
+
+    const fetchPromises = chunk.map(async (fileName) => {
+      try {
+        const fileUrl = `${urlPath}/${fileName}`;
+        const res = await fetch(fileUrl);
+        if (!res.ok) throw new Error(`Failed to fetch ${fileName}`);
+        const text = await res.text();
+        const align = parseAlignmentText(text, fileName, fileName);
+        parsedAlignments.push(align);
+        clientAlignmentsCache.set(align.file_path, align);
+      } catch (e) {
+        console.warn('Failed to parse alignment from URL:', fileName, e);
+      }
+    });
+    
+    await Promise.all(fetchPromises);
+
+    if (onProgress) {
+      const current = Math.min(total, i + BATCH_SIZE);
+      const lastFile = chunk[chunk.length - 1] || '';
+      onProgress(current, total, lastFile);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  const scanResponse = buildScanResponseFromAlignments(parsedAlignments, recipe);
+  return { dirName, scanResponse };
+}

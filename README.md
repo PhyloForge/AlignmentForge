@@ -4,8 +4,8 @@ AlignmentForge is an interactive visual software tool for exploring, filtering, 
 
 You can inspect sequences, filter them by quality, trim ends, and easily select the best data for your phylogenetic analysis directly in the browser or on your desktop.
 
-**[▶ Try it in your browser](https://phyloforge.github.io/AlignmentForge/)** —
-no installation, works with any alignment folder.
+**[▶ Try it in your browser](https://phyloforge.github.io/AlignmentForge/?run=example_data/all_markers)** —
+no installation, with example data.
 
 ---
 
@@ -40,6 +40,8 @@ You do not need your own alignments to see how AlignmentForge works. This reposi
 
 `example_data/exons/` — Ten exon-only phylip alignment files for frog phylogenomics.
 
+**[▶ Open it live](https://phyloforge.github.io/AlignmentForge/?run=example_data/exons)**
+
 | Get it | How |
 |---|---|
 | [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/exons) | See the sample files |
@@ -49,6 +51,8 @@ You do not need your own alignments to see how AlignmentForge works. This reposi
 
 `example_data/uces/` — Ten Ultraconserved Element (UCE) alignments for testing.
 
+**[▶ Open it live](https://phyloforge.github.io/AlignmentForge/?run=example_data/uces)**
+
 | Get it | How |
 |---|---|
 | [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/uces) | See the sample files |
@@ -57,6 +61,8 @@ You do not need your own alignments to see how AlignmentForge works. This reposi
 ### All markers combined
 
 `example_data/all_markers/` — A mix of different marker types in a single folder. 
+
+**[▶ Open it live](https://phyloforge.github.io/AlignmentForge/?run=example_data/all_markers)**
 
 | Get it | How |
 |---|---|
