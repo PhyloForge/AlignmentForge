@@ -18,4 +18,3 @@ test_hmm/
 test_replace/
 *.cjs
 *.R
-*.rs
