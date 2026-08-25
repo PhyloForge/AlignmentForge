@@ -4,6 +4,7 @@ use tauri::Emitter;
 
 use crate::export::batch::{execute_batch_export, BatchExportConfig, BatchExportResult};
 use crate::export::concatenate::{concatenate_alignments, ConcatenateConfig, ConcatenateResult};
+use crate::export::group::{concatenate_alignments_by_gene, GroupedConcatenateConfig, GroupedConcatenateResult};
 use crate::filter_config::{load_filter_config as read_filter_config, save_filter_config as write_filter_config};
 use crate::models::{
     Alignment, AlignmentFormat, AlignmentSummary, DatasetOverview, TaxonOccupancy, TrimmingDiff,
@@ -225,6 +226,22 @@ pub async fn run_concatenate(
         let dataset_alignments = cache.get_all();
         let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &dataset_alignments);
         concatenate_alignments(&config, &runtime_recipe)
+    })
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn run_grouped_concatenate(
+    state: tauri::State<'_, AlignmentCache>,
+    config: GroupedConcatenateConfig,
+    recipe: TrimmingRecipe,
+) -> Result<GroupedConcatenateResult, String> {
+    let cache = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let dataset_alignments = cache.get_all();
+        let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &dataset_alignments);
+        concatenate_alignments_by_gene(&config, &runtime_recipe)
     })
         .await
         .map_err(|e| e.to_string())?

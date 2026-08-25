@@ -23,7 +23,7 @@ interface HeaderProps {
   activeView: ViewMode;
   onSelectView: (view: ViewMode) => void;
   onOpenDirectory: () => void;
-  onOpenExportModal: (mode: 'batch' | 'concatenate') => void;
+  onOpenExportModal: (mode: 'batch' | 'concatenate' | 'group') => void;
   isDarkTheme: boolean;
   onToggleTheme: () => void;
 }
@@ -152,6 +152,17 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <Layers className="w-3.5 h-3.5" />
           <span>Supermatrix</span>
+        </button>
+
+        {/* Gene Batch */}
+        <button
+          onClick={() => onOpenExportModal('group')}
+          disabled={totalAlignments === 0}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-[#2d1b38] hover:bg-[#3f254f] text-fuchsia-300 border border-fuchsia-500/30 text-xs font-medium transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Concatenate Exons by Gene"
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>Gene Batch</span>
         </button>
 
         {/* Theme toggle */}

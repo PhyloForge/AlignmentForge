@@ -7,6 +7,8 @@ import {
   CatalogUpdateResponse,
   ConcatenateConfig,
   ConcatenateResult,
+  GroupedConcatenateConfig,
+  GroupedConcatenateResult,
   DatasetOverview,
   ScanResponse,
   TaxonOccupancy,
@@ -63,6 +65,23 @@ export async function openDirectoryDialog(): Promise<string | null> {
   return null;
 }
 
+export async function openFileDialog(): Promise<string | null> {
+  if (isTauri) {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        title: 'Select Gene Mapping File (CSV/TSV/TXT)',
+      });
+      return (selected as string) || null;
+    } catch (err) {
+      console.warn('Native file dialog error:', err);
+      return null;
+    }
+  }
+  return null;
+}
 export async function openSaveDirectoryDialog(): Promise<string | null> {
   if (isTauri) {
     try {
@@ -337,6 +356,21 @@ export async function runConcatenate(
       total_length: 12000,
       total_loci: config.input_paths.length,
       supermatrix_path: `${config.output_file_prefix}.${config.output_format === 'phylip' ? 'phy' : 'fa'}`,
+    };
+  }
+}
+
+export async function runGroupedConcatenate(
+  config: GroupedConcatenateConfig,
+  recipe: TrimmingRecipe
+): Promise<GroupedConcatenateResult> {
+  if (isTauri) {
+    return invokeTauri<GroupedConcatenateResult>('run_grouped_concatenate', { config, recipe });
+  } else {
+    return {
+      total_genes: 5,
+      total_exons_processed: config.input_paths.length,
+      output_directory: config.output_directory,
     };
   }
 }

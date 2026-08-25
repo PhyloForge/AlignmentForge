@@ -23,6 +23,7 @@ pub fn run() {
             recalculate_catalog,
             run_batch_export,
             run_concatenate,
+            run_grouped_concatenate,
             save_filter_config,
             load_filter_config,
             save_alignment_stats_csv,

@@ -181,7 +181,7 @@ export const App: React.FC = () => {
       dimConsensusMatches: false,
     });
   const [showDiffOverlay, setShowDiffOverlay] = useState<boolean>(true);
-  const [exportModalMode, setExportModalMode] = useState<'batch' | 'concatenate' | null>(null);
+  const [exportModalMode, setExportModalMode] = useState<'batch' | 'concatenate' | 'group' | null>(null);
   const [isDarkTheme, setIsDarkTheme] = useState<boolean>(true);
     useEffect(() => {
     if (isDarkTheme) {

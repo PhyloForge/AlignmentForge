@@ -15,12 +15,15 @@ import {
   BatchExportResult,
   ConcatenateConfig,
   ConcatenateResult,
+  GroupedConcatenateConfig,
+  GroupedConcatenateResult,
   TrimmingRecipe,
 } from '../types';
-import { openSaveDirectoryDialog, runBatchExport, runConcatenate } from '../tauriClient';
+import { openSaveDirectoryDialog, openFileDialog, runBatchExport, runConcatenate, runGroupedConcatenate } from '../tauriClient';
+import { Sparkles, FileSearch } from 'lucide-react';
 
 interface ExportModalProps {
-  mode: 'batch' | 'concatenate';
+  mode: 'batch' | 'concatenate' | 'group';
   onClose: () => void;
   selectedPaths: string[];
   allPaths: string[];
@@ -36,6 +39,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 }) => {
   const [outputDir, setOutputDir] = useState<string>('output/trimmed_alignments');
   const [outputPrefix, setOutputPrefix] = useState<string>('output/supermatrix');
+  const [geneMappingPath, setGeneMappingPath] = useState<string>('');
   const [outputFormat, setOutputFormat] = useState<AlignmentFormat>('phylip');
   const [onlyPassing, setOnlyPassing] = useState<boolean>(true);
   const [exportScope, setExportScope] = useState<'all' | 'selected'>('all');
@@ -51,6 +55,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [batchResult, setBatchResult] = useState<BatchExportResult | null>(null);
   const [concatResult, setConcatResult] = useState<ConcatenateResult | null>(null);
+  const [groupResult, setGroupResult] = useState<GroupedConcatenateResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const activePaths =
@@ -61,6 +66,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     if (picked) {
       setOutputDir(picked);
       setOutputPrefix(`${picked}/supermatrix`);
+    }
+  };
+
+  const handlePickMappingFile = async () => {
+    const picked = await openFileDialog();
+    if (picked) {
+      setGeneMappingPath(picked);
     }
   };
 
@@ -81,7 +93,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         };
         const res = await runBatchExport(config, recipe);
         setBatchResult(res);
-      } else {
+      } else if (mode === 'concatenate') {
         const config: ConcatenateConfig = {
           input_paths: activePaths,
           output_file_prefix: outputPrefix,
@@ -92,6 +104,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         };
         const res = await runConcatenate(config, recipe);
         setConcatResult(res);
+      } else if (mode === 'group') {
+        if (!geneMappingPath) {
+          throw new Error('Please select a gene mapping file.');
+        }
+        const config: GroupedConcatenateConfig = {
+          input_paths: activePaths,
+          output_directory: outputDir,
+          gene_mapping_csv_path: geneMappingPath,
+          output_format: outputFormat,
+          only_passing: onlyPassing,
+          write_raxml_partitions: writeRaxmlPartitions,
+          write_nexus_partitions: writeNexusPartitions,
+        };
+        const res = await runGroupedConcatenate(config, recipe);
+        setGroupResult(res);
       }
     } catch (e: any) {
       setErrorMsg(e.toString());
@@ -111,10 +138,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <Download className="w-4 h-4 text-blue-400" />
                 <span>Batch Export Trimmed Alignments</span>
               </>
-            ) : (
+            ) : mode === 'concatenate' ? (
               <>
                 <Layers className="w-4 h-4 text-emerald-400" />
                 <span>Concatenate into Supermatrix & Partitions</span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4 text-fuchsia-400" />
+                <span>Batch Concatenate Exons by Gene</span>
               </>
             )}
           </div>
@@ -128,14 +160,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
         {/* Content Body */}
         <div className="p-5 space-y-4 text-xs">
-          {batchResult || concatResult ? (
+          {batchResult || concatResult || groupResult ? (
             /* Success Feedback */
             <div className="py-4 text-center space-y-3">
               <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
                 <CheckCircle className="w-6 h-6" />
               </div>
               <h3 className="font-semibold text-sm text-[#dce6ff]">
-                {mode === 'batch' ? 'Batch Export Complete!' : 'Supermatrix Assembly Complete!'}
+                {mode === 'batch' 
+                  ? 'Batch Export Complete!' 
+                  : mode === 'concatenate' 
+                  ? 'Supermatrix Assembly Complete!' 
+                  : 'Gene Batch Complete!'}
               </h3>
               {batchResult && (
                 <div className="font-mono text-xs text-[#8b949e] bg-[#0e1014] p-3 rounded border border-[#232833] text-left space-y-1">
@@ -164,6 +200,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   </div>
                 </div>
               )}
+              {groupResult && (
+                <div className="font-mono text-xs text-[#8b949e] bg-[#0e1014] p-3 rounded border border-[#232833] text-left space-y-1">
+                  <div>Generated Gene Supermatrices: <b className="text-emerald-400">{groupResult.total_genes}</b></div>
+                  <div>Total Exons Assembled: <b className="text-emerald-400">{groupResult.total_exons_processed}</b></div>
+                  <div className="text-[11px] text-cyan-400 pt-1 truncate">
+                    💾 Output Directory: {groupResult.output_directory}
+                  </div>
+                </div>
+              )}
               <div className="pt-2">
                 <button
                   onClick={onClose}
@@ -175,17 +220,42 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
           ) : (
             <>
+              {/* Metadata File (Gene Batch only) */}
+              {mode === 'group' && (
+                <div className="mb-4">
+                  <label className="text-[11px] font-semibold text-[#8b949e] uppercase block mb-1.5">
+                    Exon to Gene Mapping File (CSV/TSV/TXT)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={geneMappingPath}
+                      placeholder="Select metadata document..."
+                      className="flex-1 bg-[#1b2029] border border-[#2d3545] rounded-md px-3 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
+                    />
+                    <button
+                      onClick={handlePickMappingFile}
+                      className="px-3 py-1.5 bg-[#1f242e] hover:bg-[#28303d] border border-[#2d3545] rounded-md text-xs text-[#c9d1d9] flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <FileSearch className="w-3.5 h-3.5 text-fuchsia-400" />
+                      <span>Browse File</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Output Directory / Path */}
               <div>
                 <label className="text-[11px] font-semibold text-[#8b949e] uppercase block mb-1.5">
-                  {mode === 'batch' ? 'Output Folder Destination' : 'Supermatrix Output Path Prefix'}
+                  {mode === 'batch' || mode === 'group' ? 'Output Folder Destination' : 'Supermatrix Output Path Prefix'}
                 </label>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    value={mode === 'batch' ? outputDir : outputPrefix}
+                    value={mode === 'batch' || mode === 'group' ? outputDir : outputPrefix}
                     onChange={(e) =>
-                      mode === 'batch' ? setOutputDir(e.target.value) : setOutputPrefix(e.target.value)
+                      mode === 'batch' || mode === 'group' ? setOutputDir(e.target.value) : setOutputPrefix(e.target.value)
                     }
                     className="flex-1 bg-[#1b2029] border border-[#2d3545] rounded-md px-3 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
                   />
@@ -293,7 +363,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                         type="checkbox"
                         checked={writeRaxmlPartitions}
                         onChange={(e) => setWriteRaxmlPartitions(e.target.checked)}
-                        className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500"
+                        className={mode === 'group' ? "rounded bg-[#1f242e] border-[#2d3545] text-fuchsia-500" : "rounded bg-[#1f242e] border-[#2d3545] text-emerald-500"}
                       />
                       <span className="text-[#c9d1d9]">
                         Generate RAxML / RAxML-NG partition file (<code>_partitions.txt</code>)
@@ -305,7 +375,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                         type="checkbox"
                         checked={writeNexusPartitions}
                         onChange={(e) => setWriteNexusPartitions(e.target.checked)}
-                        className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500"
+                        className={mode === 'group' ? "rounded bg-[#1f242e] border-[#2d3545] text-fuchsia-500" : "rounded bg-[#1f242e] border-[#2d3545] text-emerald-500"}
                       />
                       <span className="text-[#c9d1d9]">
                         Generate IQ-TREE / NEXUS partition block (<code>_partitions.nex</code>)
@@ -341,10 +411,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                       <Download className="w-3.5 h-3.5" />
                       <span>Start Batch Export</span>
                     </>
-                  ) : (
+                  ) : mode === 'concatenate' ? (
                     <>
                       <Layers className="w-3.5 h-3.5" />
                       <span>Assemble Supermatrix</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Batch Concatenate Exons</span>
                     </>
                   )}
                 </button>

@@ -1198,7 +1198,7 @@ mod tests {
             min_segment_aa: 3,
             min_coding_score: 0.0,
             exclude_uce: true,
-            fail_if_no_orf: false, 
+            fail_if_no_orf: false, ..Default::default() 
         };
 
         for locus_id in [
@@ -1252,7 +1252,7 @@ mod tests {
             min_segment_aa: 2,
             min_coding_score: 0.0,
             exclude_uce: true,
-            fail_if_no_orf: true, 
+            fail_if_no_orf: true, ..Default::default() 
         };
 
         let result =
@@ -1295,7 +1295,7 @@ mod tests {
             min_segment_aa: 35,
             min_coding_score: 40.0,
             exclude_uce: false,
-            fail_if_no_orf: true, 
+            fail_if_no_orf: true, ..Default::default() 
         };
 
         let de_novo = optimize_open_reading_frames(&taxa, &sequences, "exon", &config);
@@ -1360,7 +1360,7 @@ mod tests {
             min_segment_aa: 75,
             min_coding_score: 40.0,
             exclude_uce: false,
-            fail_if_no_orf: true, 
+            fail_if_no_orf: true, ..Default::default() 
         };
 
         let result = optimize_open_reading_frames(&taxa, &seqs, "exon_stop_free", &config);

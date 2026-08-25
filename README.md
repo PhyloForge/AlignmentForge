@@ -9,12 +9,12 @@ AlignmentForge is an interactive visual software tool for exploring, filtering, 
 ## Interfaces
 
 <p align="center">
-  <img src="src/assets/screenshot_catalog_light.jpg" alt="General Catalog (Light Mode)" width="48%">
+  <img src="public/screenshot_1.png" alt="General Catalog" width="48%">
   &nbsp;
-  <img src="src/assets/screenshot_alignment_dark.jpg" alt="Sequence Alignment (Dark Mode)" width="48%">
+  <img src="public/screenshot_2.png" alt="Sequence Alignment" width="48%">
 </p>
 <p align="center">
-  <em>Left: The General Catalog interface in Light Mode, displaying an overview of your sequences and projects. Right: The detailed Sequence Alignment view in Dark Mode, showing the colorful nucleotide matrix.</em>
+  <em>Left: The General Catalog interface displaying an overview of sequences and projects. Right: The detailed Sequence Alignment view showing the nucleotide matrix.</em>
 </p>
 
 You can inspect sequences, filter them by quality, trim ends, and easily select the best data for your phylogenetic analysis directly in the browser or on your desktop.

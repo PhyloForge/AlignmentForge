@@ -332,3 +332,19 @@ export interface ConcatenateResult {
   raxml_partition_path?: string;
   nexus_partition_path?: string;
 }
+
+export interface GroupedConcatenateConfig {
+  input_paths: string[];
+  output_directory: string;
+  gene_mapping_csv_path: string;
+  output_format: AlignmentFormat;
+  only_passing: boolean;
+  write_raxml_partitions: boolean;
+  write_nexus_partitions: boolean;
+}
+
+export interface GroupedConcatenateResult {
+  total_genes: number;
+  total_exons_processed: number;
+  output_directory: string;
+}
