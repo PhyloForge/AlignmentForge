@@ -907,6 +907,16 @@ export function parseAlignmentText(text: string, fileName: string, filePath: str
   }
 }
 
+/** Ordinary alignment processing used by Catalog QC and general export. */
+export function recipeWithoutOrfAnalysis(recipe: TrimmingRecipe): TrimmingRecipe {
+  return {
+    ...recipe,
+    enable_orf: false,
+    orf_use_references: false,
+    fail_if_no_orf: false,
+  };
+}
+
 export function computeAlignmentSummary(
   rawAlign: Alignment,
   recipe: TrimmingRecipe,
@@ -923,8 +933,17 @@ export function computeAlignmentSummary(
   }
   const rawGapPercent = rawTotalChars > 0 ? (rawGapCount / rawTotalChars) * 100 : 0;
 
-  // Apply trimming recipe to compute post-trimming metrics & quality assessment
-  const trimmedView = executeClientTrimming(rawAlign, recipe, totalDatasetTaxa);
+  // Catalog alignment QC and ORF analysis are independent branches. Ordinary
+  // metrics and pass/fail always come from the ORF-disabled branch.
+  const trimmedView = executeClientTrimming(
+    rawAlign,
+    recipeWithoutOrfAnalysis(recipe),
+    totalDatasetTaxa
+  );
+  const orfView = recipe.enable_orf
+    ? executeClientTrimming(rawAlign, recipe, totalDatasetTaxa)
+    : trimmedView;
+  const orfDiff = orfView.diff;
   const align = trimmedView.trimmed_alignment;
 
   const numTaxa = align.taxa.length;
@@ -1073,29 +1092,39 @@ export function computeAlignmentSummary(
     gc_percent: Number(gcPercent.toFixed(1)),
     pass,
     fail_reasons: failReasons,
-    orf_valid: trimmedView.diff.found_valid_orf ?? true,
-    orf_evaluated: trimmedView.diff.orf_evaluated ?? false,
-    orf_candidate_found: trimmedView.diff.orf_candidate_found ?? false,
-    orf_frame: trimmedView.diff.orf_frame,
-    orf_start: trimmedView.diff.orf_start,
-    orf_end: trimmedView.diff.orf_end,
-    orf_support_count: trimmedView.diff.orf_support_count ?? 0,
-    orf_support_percent: trimmedView.diff.orf_support_percent ?? 0,
-    orf_retained_samples: trimmedView.diff.orf_retained_samples ?? 0,
-    orf_candidate_length_aa: trimmedView.diff.orf_candidate_length_aa ?? 0,
-    orf_coding_score: trimmedView.diff.orf_coding_score ?? 0,
-    orf_amino_acid_conservation: trimmedView.diff.orf_amino_acid_conservation ?? 0,
-    orf_frame_contrast: trimmedView.diff.orf_frame_contrast ?? 0,
-    orf_reference_evaluated: trimmedView.diff.orf_reference_evaluated ?? false,
-    orf_reference_matched: trimmedView.diff.orf_reference_matched ?? false,
-    orf_reference_identity: trimmedView.diff.orf_reference_identity ?? 0,
-    orf_reference_coverage: trimmedView.diff.orf_reference_coverage ?? 0,
-    orf_intron_length: trimmedView.diff.orf_intron_length ?? 0,
+    orf_valid: orfDiff.found_valid_orf ?? true,
+    orf_evaluated: orfDiff.orf_evaluated ?? false,
+    orf_candidate_found: orfDiff.orf_candidate_found ?? false,
+    orf_frame: orfDiff.orf_frame,
+    orf_start: orfDiff.orf_start,
+    orf_end: orfDiff.orf_end,
+    orf_support_count: orfDiff.orf_support_count ?? 0,
+    orf_support_percent: orfDiff.orf_support_percent ?? 0,
+    orf_retained_samples: orfDiff.orf_retained_samples ?? 0,
+    orf_candidate_length_aa: orfDiff.orf_candidate_length_aa ?? 0,
+    orf_coding_score: orfDiff.orf_coding_score ?? 0,
+    orf_amino_acid_conservation: orfDiff.orf_amino_acid_conservation ?? 0,
+    orf_frame_contrast: orfDiff.orf_frame_contrast ?? 0,
+    orf_reference_evaluated: orfDiff.orf_reference_evaluated ?? false,
+    orf_reference_matched: orfDiff.orf_reference_matched ?? false,
+    orf_reference_identity: orfDiff.orf_reference_identity ?? 0,
+    orf_reference_coverage: orfDiff.orf_reference_coverage ?? 0,
+    orf_intron_length: orfDiff.orf_intron_length ?? 0,
     raw_num_taxa: rawNumTaxa,
     raw_length: rawLength,
     raw_gap_percent: Number(rawGapPercent.toFixed(1)),
     retained_taxa: [...align.taxa],
     retained_taxon_basepairs: retainedTaxonBasepairs,
+    orf_retained_taxa: [...orfView.trimmed_alignment.taxa],
+    orf_retained_taxon_basepairs: Object.fromEntries(
+      orfView.trimmed_alignment.taxa.map((taxon, index) => {
+        const sequence = orfView.trimmed_alignment.sequences[index] ?? '';
+        const basepairs = Array.from(sequence).filter(
+          (state) => !['-', '?', 'N'].includes(state.toUpperCase())
+        ).length;
+        return [taxon, basepairs];
+      })
+    ),
   };
 }
 
@@ -1278,24 +1307,6 @@ export function reevaluateSummaries(
       failReasons.push('0 surviving taxa (all samples pruned)');
     }
 
-    const hadOrfFailure = s.fail_reasons.some(
-      (reason) =>
-        reason.startsWith('ORF check failed') ||
-        reason.startsWith('Candidate ORF failed') ||
-        reason.startsWith('Reference-guided exon failed')
-    );
-    const isCodingWithOrf =
-      recipe.enable_orf &&
-      !(recipe.exclude_uce && shouldSkipOrfLocus(s.id, recipe.orf_search_mode));
-    const orfValid = s.orf_valid ?? !hadOrfFailure;
-    if (
-      isCodingWithOrf &&
-      recipe.fail_if_no_orf &&
-      (!orfValid || s.num_taxa === 0 || hadOrfFailure)
-    ) {
-      failReasons.push(candidateOrfFailureReason(s, recipe));
-    }
-
     if (recipe.assess_alignment) {
       if (recipe.min_taxa > 0 && s.num_taxa < recipe.min_taxa) {
         failReasons.push(`Taxa (${s.num_taxa} < min ${recipe.min_taxa})`);
@@ -1399,7 +1410,6 @@ export function reevaluateAlignmentView(
 
   if (
     isCodingWithOrf &&
-    recipe.fail_if_no_orf &&
     (!foundValidOrf ||
       diff.new_taxa_count === 0 ||
       hadOrfFailure ||
@@ -2195,7 +2205,6 @@ export function executeClientTrimming(
       const retainedInternalStop = finalStopCodons.some((stop) => !stop.is_terminal);
       if (
         isCodingWithOrf &&
-        recipe.fail_if_no_orf &&
         (!foundValidOrf || newTaxaCount === 0 || retainedInternalStop)
       ) return false;
       if (recipe.assess_alignment) {
@@ -2222,7 +2231,6 @@ export function executeClientTrimming(
       const retainedInternalStop = finalStopCodons.some((stop) => !stop.is_terminal);
       if (
         isCodingWithOrf &&
-        recipe.fail_if_no_orf &&
         (!foundValidOrf || newTaxaCount === 0 || retainedInternalStop)
       ) {
         if (referenceBlocksOrf) {

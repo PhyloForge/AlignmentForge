@@ -257,7 +257,7 @@ const OrfAnalysisView: React.FC<OrfAnalysisViewProps> = ({
               {sortableHeader('ORF LENGTH', 'length')}
               {sortableHeader('CODING EVIDENCE', 'coding')}
               {sortableHeader('INTRON', 'intron')}
-              {sortableHeader('ALIGNMENT STATUS', 'status')}
+              {sortableHeader('CATALOG QC', 'status')}
               <th className="px-3 py-2.5 text-center">VIEW</th>
             </tr>
           </thead>

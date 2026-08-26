@@ -22,7 +22,7 @@ import {
   recalculateCatalog,
   scanDirectory,
 } from './tauriClient';
-import { reevaluateAlignmentView, reevaluateSummaries } from './parsers/clientParser';
+import { recipeWithoutOrfAnalysis, reevaluateSummaries } from './parsers/clientParser';
 import { Header } from './components/Header';
 import { FilterSidebar } from './components/FilterSidebar';
 import { OrfAnalysisSidebar } from './components/OrfAnalysisSidebar';
@@ -73,8 +73,22 @@ function assessmentRecipeKey(recipe: TrimmingRecipe): string {
     min_pis_percent: recipe.min_pis_percent,
     min_variable_count: recipe.min_variable_count,
     min_variable_percent: recipe.min_variable_percent,
-    fail_if_no_orf: recipe.fail_if_no_orf,
   });
+}
+
+function applyCatalogAssessmentToView(
+  view: AlignmentViewResponse,
+  summary: AlignmentSummary | undefined
+): AlignmentViewResponse {
+  if (!summary) return view;
+  return {
+    ...view,
+    diff: {
+      ...view.diff,
+      pass: summary.pass,
+      fail_reasons: summary.fail_reasons,
+    },
+  };
 }
 
 export const App: React.FC = () => {
@@ -204,12 +218,21 @@ export const App: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const rawSummariesRef = useRef<AlignmentSummary[]>([]);
+  const summariesRef = useRef<AlignmentSummary[]>([]);
   const catalogRequestIdRef = useRef(0);
   const activeRecipeRef = useRef(activeRecipe);
   activeRecipeRef.current = activeRecipe;
+  summariesRef.current = summaries;
 
   const processingRecipeKey = sequenceProcessingRecipeKey(activeRecipe);
   const processingRecipe = useMemo(() => activeRecipe, [processingRecipeKey]);
+  const viewerProcessingRecipe = useMemo(
+    () =>
+      msaSidebarContext === 'orf'
+        ? processingRecipe
+        : recipeWithoutOrfAnalysis(processingRecipe),
+    [msaSidebarContext, processingRecipe]
+  );
   const gatingRecipeKey = assessmentRecipeKey(activeRecipe);
 
   // Initialize presets & Tauri progress event listener
@@ -362,11 +385,14 @@ export const App: React.FC = () => {
     setAlignmentLoadError(null);
     let isCancelled = false;
     const totalUniqueTaxa = overview.total_unique_taxa || occupancy.length || 0;
-    getAlignment(selectedFilePath, processingRecipe, totalUniqueTaxa)
+    getAlignment(selectedFilePath, viewerProcessingRecipe, totalUniqueTaxa)
       .then((data) => {
         if (!isCancelled) {
           setViewData(
-            reevaluateAlignmentView(data, activeRecipeRef.current, totalUniqueTaxa)
+            applyCatalogAssessmentToView(
+              data,
+              summariesRef.current.find((summary) => summary.file_path === selectedFilePath)
+            )
           );
         }
       })
@@ -380,7 +406,7 @@ export const App: React.FC = () => {
     return () => {
       isCancelled = true;
     };
-  }, [activeView, selectedFilePath, processingRecipe, overview.total_unique_taxa, occupancy.length]);
+  }, [activeView, selectedFilePath, viewerProcessingRecipe, overview.total_unique_taxa, occupancy.length]);
 
   // Instant in-memory re-gating whenever recipe assessment thresholds change.
   // Uses the latest completed pipeline metrics for immediate slider feedback.
@@ -396,14 +422,17 @@ export const App: React.FC = () => {
     setOverview(updatedOverview);
   }, [activeRecipe]);
 
-  // Assessment controls only change pass/fail. Keep an open preview synchronized
-  // without re-running any sequence transformations.
+  // Keep an open preview synchronized to Catalog QC without applying ORF sample
+  // loss or ORF candidate failure to the alignment assessment badge.
   useEffect(() => {
-    const totalUniqueTaxa = overview.total_unique_taxa || occupancy.length || 0;
-    setViewData((current) =>
-      current ? reevaluateAlignmentView(current, activeRecipe, totalUniqueTaxa) : current
-    );
-  }, [gatingRecipeKey, overview.total_unique_taxa, occupancy.length]);
+    setViewData((current) => {
+      if (!current) return current;
+      const summary = summaries.find(
+        (candidate) => candidate.file_path === current.raw_alignment.file_path
+      );
+      return applyCatalogAssessmentToView(current, summary);
+    });
+  }, [summaries, gatingRecipeKey]);
 
   // Run the full trimming pipeline across every alignment whenever the recipe changes.
   // A request generation prevents slower, stale calculations from overwriting the

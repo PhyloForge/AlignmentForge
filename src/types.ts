@@ -124,6 +124,9 @@ export interface AlignmentSummary {
   /** Samples and usable base-pair totals surviving the current processing recipe. */
   retained_taxa?: string[];
   retained_taxon_basepairs?: Record<string, number>;
+  /** Samples retained by the independent accepted-ORF output branch. */
+  orf_retained_taxa?: string[];
+  orf_retained_taxon_basepairs?: Record<string, number>;
 }
 
 export interface DatasetOverview {
@@ -298,8 +301,13 @@ export interface AlignmentViewResponse {
 export interface BatchExportConfig {
   input_paths: string[];
   output_directory: string;
+  general_alignment_directory_name: string;
+  orf_alignment_directory_name: string;
+  intron_directory_name: string;
   output_format: AlignmentFormat;
   only_passing: boolean;
+  export_general_alignments: boolean;
+  export_orf_alignments: boolean;
   save_recipe_json: boolean;
   save_summary_csv: boolean;
   export_introns: boolean;
@@ -309,6 +317,9 @@ export interface BatchExportResult {
   total_processed: number;
   total_exported: number;
   total_discarded: number;
+  total_orfs_exported?: number;
+  alignment_directory_path?: string;
+  orf_directory_path?: string;
   summary_csv_path?: string;
   recipe_json_path?: string;
   total_introns_exported?: number;

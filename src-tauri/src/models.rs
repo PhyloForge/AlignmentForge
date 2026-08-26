@@ -128,6 +128,10 @@ pub struct AlignmentSummary {
     pub retained_taxa: Vec<String>,
     #[serde(default)]
     pub retained_taxon_basepairs: std::collections::HashMap<String, usize>,
+    #[serde(default)]
+    pub orf_retained_taxa: Vec<String>,
+    #[serde(default)]
+    pub orf_retained_taxon_basepairs: std::collections::HashMap<String, usize>,
 }
 
 /// Overall dataset statistics across all alignments

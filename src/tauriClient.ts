@@ -334,12 +334,23 @@ export async function runBatchExport(
   } else {
     return {
       total_processed: config.input_paths.length,
-      total_exported: config.input_paths.length,
+      total_exported: config.export_general_alignments ? config.input_paths.length : 0,
       total_discarded: 0,
+      total_orfs_exported:
+        config.export_orf_alignments && recipe.enable_orf ? config.input_paths.length : 0,
+      alignment_directory_path: config.export_general_alignments
+        ? `${config.output_directory}/${config.general_alignment_directory_name}`
+        : undefined,
+      orf_directory_path:
+        config.export_orf_alignments && recipe.enable_orf
+          ? `${config.output_directory}/${config.orf_alignment_directory_name}`
+          : undefined,
       summary_csv_path: `${config.output_directory}/alignment-trimming_summary.csv`,
       recipe_json_path: `${config.output_directory}/recipe.json`,
       total_introns_exported: config.export_introns ? config.input_paths.length : 0,
-      intron_directory_path: config.export_introns ? `${config.output_directory}/introns` : undefined,
+      intron_directory_path: config.export_introns
+        ? `${config.output_directory}/${config.intron_directory_name}`
+        : undefined,
     };
   }
 }

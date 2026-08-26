@@ -30,6 +30,19 @@ interface ExportModalProps {
   recipe: TrimmingRecipe;
 }
 
+const joinDirectory = (parent: string, child: string) => {
+  if (!parent) return child;
+  return `${parent}${/[\\/]$/.test(parent) ? '' : '/'}${child}`;
+};
+
+const validateFolderName = (label: string, value: string) => {
+  const name = value.trim();
+  if (!name || name === '.' || name === '..' || /[\\/]/.test(name)) {
+    throw new Error(`${label} must be one folder name without / or \\.`);
+  }
+  return name;
+};
+
 export const ExportModal: React.FC<ExportModalProps> = ({
   mode,
   onClose,
@@ -38,10 +51,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   recipe,
 }) => {
   const [outputDir, setOutputDir] = useState<string>('output/trimmed_alignments');
+  const [batchParentDir, setBatchParentDir] = useState<string>('output');
+  const [batchOutputFolderName, setBatchOutputFolderName] = useState<string>('trimmed_alignments');
+  const [generalAlignmentFolderName, setGeneralAlignmentFolderName] = useState<string>('all_alignments');
+  const [orfAlignmentFolderName, setOrfAlignmentFolderName] = useState<string>('orf_alignments');
+  const [intronFolderName, setIntronFolderName] = useState<string>('intron_alignments');
   const [outputPrefix, setOutputPrefix] = useState<string>('output/supermatrix');
   const [geneMappingPath, setGeneMappingPath] = useState<string>('');
   const [outputFormat, setOutputFormat] = useState<AlignmentFormat>('phylip');
   const [onlyPassing, setOnlyPassing] = useState<boolean>(true);
+  const [exportGeneralAlignments, setExportGeneralAlignments] = useState<boolean>(true);
+  const [exportOrfAlignments, setExportOrfAlignments] = useState<boolean>(recipe.enable_orf);
   const [exportScope, setExportScope] = useState<'all' | 'selected'>('all');
 
   const [saveSummaryCsv, setSaveSummaryCsv] = useState<boolean>(true);
@@ -61,11 +81,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const activePaths =
     exportScope === 'selected' && selectedPaths.length > 0 ? selectedPaths : allPaths;
 
+  const batchOutputDir = joinDirectory(batchParentDir, batchOutputFolderName.trim());
+
   const handlePickOutputDir = async () => {
     const picked = await openSaveDirectoryDialog();
     if (picked) {
-      setOutputDir(picked);
-      setOutputPrefix(`${picked}/supermatrix`);
+      if (mode === 'batch') {
+        setBatchParentDir(picked);
+      } else {
+        setOutputDir(picked);
+        setOutputPrefix(`${picked}/supermatrix`);
+      }
     }
   };
 
@@ -82,11 +108,31 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
     try {
       if (mode === 'batch') {
+        const outputFolderName = validateFolderName('Output folder name', batchOutputFolderName);
+        const generalFolderName = validateFolderName(
+          'General alignment folder name',
+          generalAlignmentFolderName
+        );
+        const orfFolderName = validateFolderName('ORF alignment folder name', orfAlignmentFolderName);
+        const intronName = validateFolderName('Intron folder name', intronFolderName);
+        const activeFolderNames = [
+          exportGeneralAlignments ? generalFolderName : null,
+          exportOrfAlignments && recipe.enable_orf ? orfFolderName : null,
+          exportIntrons ? intronName : null,
+        ].filter((name): name is string => name !== null);
+        if (new Set(activeFolderNames.map((name) => name.toLocaleLowerCase())).size !== activeFolderNames.length) {
+          throw new Error('Exported alignment folders must have different names.');
+        }
         const config: BatchExportConfig = {
           input_paths: activePaths,
-          output_directory: outputDir,
+          output_directory: joinDirectory(batchParentDir, outputFolderName),
+          general_alignment_directory_name: generalFolderName,
+          orf_alignment_directory_name: orfFolderName,
+          intron_directory_name: intronName,
           output_format: outputFormat,
           only_passing: onlyPassing,
+          export_general_alignments: exportGeneralAlignments,
+          export_orf_alignments: exportOrfAlignments,
           save_recipe_json: saveRecipeJson,
           save_summary_csv: saveSummaryCsv,
           export_introns: exportIntrons,
@@ -129,7 +175,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 select-none">
-      <div className="bg-[#14171d] border border-[#232833] rounded-xl w-[540px] overflow-hidden shadow-2xl flex flex-col text-[#c9d1d9]">
+      <div className="bg-[#14171d] border border-[#232833] rounded-xl w-[540px] max-h-[90vh] overflow-hidden shadow-2xl flex flex-col text-[#c9d1d9]">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[#232833] flex items-center justify-between bg-[#171b22]">
           <div className="flex items-center gap-2 font-semibold text-sm text-[#dce6ff]">
@@ -159,7 +205,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-5 space-y-4 text-xs">
+        <div className="p-5 space-y-4 text-xs overflow-y-auto">
           {batchResult || concatResult || groupResult ? (
             /* Success Feedback */
             <div className="py-4 text-center space-y-3">
@@ -175,13 +221,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               </h3>
               {batchResult && (
                 <div className="font-mono text-xs text-[#8b949e] bg-[#0e1014] p-3 rounded border border-[#232833] text-left space-y-1">
-                  <div>Exported: <b className="text-emerald-400">{batchResult.total_exported}</b> alignments</div>
-                  <div>Discarded by gating: <b className="text-rose-400">{batchResult.total_discarded}</b></div>
+                  <div>General alignments exported: <b className="text-emerald-400">{batchResult.total_exported}</b></div>
+                  <div>Catalog QC failures: <b className="text-rose-400">{batchResult.total_discarded}</b></div>
+                  {(batchResult.total_orfs_exported ?? 0) > 0 && (
+                    <div>Accepted ORF alignments exported: <b className="text-violet-300">{batchResult.total_orfs_exported}</b></div>
+                  )}
                   {(batchResult.total_introns_exported ?? 0) > 0 && (
                     <div>Exported intron alignments: <b className="text-blue-300">{batchResult.total_introns_exported}</b></div>
                   )}
                   {batchResult.intron_directory_path && (
                     <div className="text-[11px] text-blue-400 pt-1">Intron folder: {batchResult.intron_directory_path}</div>
+                  )}
+                  {batchResult.alignment_directory_path && (
+                    <div className="text-[11px] text-emerald-400 pt-1">General alignment folder: {batchResult.alignment_directory_path}</div>
+                  )}
+                  {batchResult.orf_directory_path && (
+                    <div className="text-[11px] text-violet-400 pt-1">ORF alignment folder: {batchResult.orf_directory_path}</div>
                   )}
                   {batchResult.summary_csv_path && (
                     <div className="text-[11px] text-blue-400 pt-1">
@@ -248,14 +303,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               {/* Output Directory / Path */}
               <div>
                 <label className="text-[11px] font-semibold text-[#8b949e] uppercase block mb-1.5">
-                  {mode === 'batch' || mode === 'group' ? 'Output Folder Destination' : 'Supermatrix Output Path Prefix'}
+                  {mode === 'batch'
+                    ? 'Parent Output Destination'
+                    : mode === 'group'
+                      ? 'Output Folder Destination'
+                      : 'Supermatrix Output Path Prefix'}
                 </label>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    value={mode === 'batch' || mode === 'group' ? outputDir : outputPrefix}
+                    value={mode === 'batch' ? batchParentDir : mode === 'group' ? outputDir : outputPrefix}
                     onChange={(e) =>
-                      mode === 'batch' || mode === 'group' ? setOutputDir(e.target.value) : setOutputPrefix(e.target.value)
+                      mode === 'batch'
+                        ? setBatchParentDir(e.target.value)
+                        : mode === 'group'
+                          ? setOutputDir(e.target.value)
+                          : setOutputPrefix(e.target.value)
                     }
                     className="flex-1 bg-[#1b2029] border border-[#2d3545] rounded-md px-3 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
                   />
@@ -268,6 +331,55 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {mode === 'batch' && (
+                <div className="rounded-md border border-[#232833] bg-[#11141a] p-3 space-y-2.5">
+                  <label className="text-[11px] font-semibold text-[#8b949e] uppercase block">
+                    Folder Names
+                  </label>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <label className="space-y-1">
+                      <span className="text-[10px] text-[#8b949e]">Output</span>
+                      <input
+                        type="text"
+                        value={batchOutputFolderName}
+                        onChange={(e) => setBatchOutputFolderName(e.target.value)}
+                        className="w-full bg-[#1b2029] border border-[#2d3545] rounded-md px-2.5 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[10px] text-[#8b949e]">General alignments</span>
+                      <input
+                        type="text"
+                        value={generalAlignmentFolderName}
+                        onChange={(e) => setGeneralAlignmentFolderName(e.target.value)}
+                        className="w-full bg-[#1b2029] border border-[#2d3545] rounded-md px-2.5 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[10px] text-[#8b949e]">ORF alignments</span>
+                      <input
+                        type="text"
+                        value={orfAlignmentFolderName}
+                        onChange={(e) => setOrfAlignmentFolderName(e.target.value)}
+                        className="w-full bg-[#1b2029] border border-[#2d3545] rounded-md px-2.5 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-[10px] text-[#8b949e]">Intron alignments</span>
+                      <input
+                        type="text"
+                        value={intronFolderName}
+                        onChange={(e) => setIntronFolderName(e.target.value)}
+                        className="w-full bg-[#1b2029] border border-[#2d3545] rounded-md px-2.5 py-1.5 font-mono text-xs text-[#c9d1d9] outline-none"
+                      />
+                    </label>
+                  </div>
+                  <div className="text-[10px] font-mono text-[#6e7681] break-all">
+                    Output: {batchOutputDir || '—'}
+                  </div>
+                </div>
+              )}
 
               {/* Output Format */}
               <div className="grid grid-cols-2 gap-3">
@@ -313,12 +425,38 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     className="rounded bg-[#1f242e] border-[#2d3545] text-blue-500"
                   />
                   <span className="text-[#c9d1d9]">
-                    Export only loci passing quality gates ({recipe.min_taxa} taxa, {recipe.min_length} bp, {recipe.max_gap_percent}% gap)
+                    {mode === 'batch'
+                      ? `Apply Catalog quality gates to general alignments and introns (${recipe.min_taxa} taxa, ${recipe.min_length} bp, ${recipe.max_gap_percent}% gap). ORF acceptance remains independent.`
+                      : `Export only loci passing quality gates (${recipe.min_taxa} taxa, ${recipe.min_length} bp, ${recipe.max_gap_percent}% gap)`}
                   </span>
                 </label>
 
                 {mode === 'batch' ? (
                   <>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={exportGeneralAlignments}
+                        onChange={(e) => setExportGeneralAlignments(e.target.checked)}
+                        className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500"
+                      />
+                      <span className="text-[#c9d1d9]">
+                        Export general alignments to <code>{generalAlignmentFolderName.trim() || '—'}/</code> using Catalog Pass/Fail
+                      </span>
+                    </label>
+                    {recipe.enable_orf && (
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={exportOrfAlignments}
+                          onChange={(e) => setExportOrfAlignments(e.target.checked)}
+                          className="rounded bg-[#1f242e] border-[#2d3545] text-violet-500"
+                        />
+                        <span className="text-[#c9d1d9]">
+                          Export accepted ORF alignments independently to <code>{orfAlignmentFolderName.trim() || '—'}/</code>
+                        </span>
+                      </label>
+                    )}
                     {recipe.enable_orf && recipe.orf_use_references && Object.keys(recipe.orf_reference_sequences ?? {}).length > 0 && (
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -328,7 +466,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                           className="rounded bg-[#1f242e] border-[#2d3545] text-blue-500"
                         />
                         <span className="text-[#c9d1d9]">
-                          Export reference-trimmed introns separately in an <code>introns/</code> folder
+                          Export reference-trimmed introns independently to <code>{intronFolderName.trim() || '—'}/</code>
                         </span>
                       </label>
                     )}

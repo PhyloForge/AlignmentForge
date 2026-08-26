@@ -202,16 +202,21 @@ export const QcDistributions: React.FC<QcDistributionsProps> = React.memo(({
     };
 
     for (const summary of summaries) {
-      // "Remaining" means the locus survives the complete alignment-level gates.
-      if (!summary.pass) continue;
-      const retainedTaxa = new Set(summary.retained_taxa ?? []);
+      // General and ORF output are independent: Catalog pass controls the
+      // trimming overlay, while ORF acceptance controls the ORF overlay.
+      const retainedTaxa = new Set(summary.pass ? summary.retained_taxa ?? [] : []);
       const acceptedOrf = Boolean(
         summary.orf_evaluated && summary.orf_candidate_found && summary.orf_valid
       );
       for (const taxon of retainedTaxa) {
         const basepairs = summary.retained_taxon_basepairs?.[taxon] ?? 0;
         addSample(trimmed, taxon, basepairs);
-        if (acceptedOrf) addSample(acceptedOrfs, taxon, basepairs);
+      }
+      if (acceptedOrf) {
+        for (const taxon of new Set(summary.orf_retained_taxa ?? [])) {
+          const basepairs = summary.orf_retained_taxon_basepairs?.[taxon] ?? 0;
+          addSample(acceptedOrfs, taxon, basepairs);
+        }
       }
     }
 

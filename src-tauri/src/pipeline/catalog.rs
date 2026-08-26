@@ -47,6 +47,17 @@ pub fn recipe_with_dataset_sample_filter(
     runtime_recipe
 }
 
+/// Builds the ordinary alignment-processing branch used by Catalog QC and
+/// general alignment export. ORF extraction is deliberately independent and
+/// must never remove samples or columns before Catalog pass/fail is assessed.
+pub fn recipe_without_orf_analysis(recipe: &TrimmingRecipe) -> TrimmingRecipe {
+    let mut catalog_recipe = recipe.clone();
+    catalog_recipe.enable_orf = false;
+    catalog_recipe.orf_use_references = false;
+    catalog_recipe.fail_if_no_orf = false;
+    catalog_recipe
+}
+
 /// Scans a directory of alignments in parallel and returns summaries for all files in a single pass.
 pub fn scan_alignment_directory<P: AsRef<Path>, F>(
     dir: P,
@@ -342,6 +353,8 @@ pub fn fast_index_alignment(
             .iter()
             .map(|(taxon, basepairs, _)| (taxon.clone(), *basepairs))
             .collect(),
+        orf_retained_taxa: Vec::new(),
+        orf_retained_taxon_basepairs: HashMap::new(),
     };
 
     (summary, taxa_stats)
@@ -355,8 +368,16 @@ pub fn summarize_alignment(
     let raw_length = alignment.length;
     let raw_num_taxa = alignment.num_taxa;
 
-    // Apply trimming recipe to compute post-trimming metrics & quality assessment
-    let (trimmed, diff) = apply_recipe(alignment, recipe, total_dataset_taxa);
+    // Catalog QC and ORF analysis are parallel outcomes. Catalog metrics come
+    // from the ordinary alignment branch; ORF metadata comes from its own
+    // branch and cannot change Catalog pass/fail or its filter measurements.
+    let catalog_recipe = recipe_without_orf_analysis(recipe);
+    let (trimmed, diff) = apply_recipe(alignment, &catalog_recipe, total_dataset_taxa);
+    let (orf_alignment, orf_diff) = if recipe.enable_orf {
+        apply_recipe(alignment, recipe, total_dataset_taxa)
+    } else {
+        (trimmed.clone(), diff.clone())
+    };
 
     let (gap_count, total_chars, _) = calculate_gap_stats(&trimmed.sequences);
     let total_bp = total_chars.saturating_sub(gap_count);
@@ -431,24 +452,24 @@ pub fn summarize_alignment(
         gc_percent,
         pass,
         fail_reasons,
-        orf_valid: diff.found_valid_orf,
-        orf_evaluated: diff.orf_evaluated,
-        orf_candidate_found: diff.orf_candidate_found,
-        orf_frame: diff.orf_frame,
-        orf_start: diff.orf_start,
-        orf_end: diff.orf_end,
-        orf_support_count: diff.orf_support_count,
-        orf_support_percent: diff.orf_support_percent,
-        orf_retained_samples: diff.orf_retained_samples,
-        orf_candidate_length_aa: diff.orf_candidate_length_aa,
-        orf_coding_score: diff.orf_coding_score,
-        orf_amino_acid_conservation: diff.orf_amino_acid_conservation,
-        orf_frame_contrast: diff.orf_frame_contrast,
-        orf_reference_evaluated: diff.orf_reference_evaluated,
-        orf_reference_matched: diff.orf_reference_matched,
-        orf_reference_identity: diff.orf_reference_identity,
-        orf_reference_coverage: diff.orf_reference_coverage,
-        orf_intron_length: diff.orf_intron_length,
+        orf_valid: orf_diff.found_valid_orf,
+        orf_evaluated: orf_diff.orf_evaluated,
+        orf_candidate_found: orf_diff.orf_candidate_found,
+        orf_frame: orf_diff.orf_frame,
+        orf_start: orf_diff.orf_start,
+        orf_end: orf_diff.orf_end,
+        orf_support_count: orf_diff.orf_support_count,
+        orf_support_percent: orf_diff.orf_support_percent,
+        orf_retained_samples: orf_diff.orf_retained_samples,
+        orf_candidate_length_aa: orf_diff.orf_candidate_length_aa,
+        orf_coding_score: orf_diff.orf_coding_score,
+        orf_amino_acid_conservation: orf_diff.orf_amino_acid_conservation,
+        orf_frame_contrast: orf_diff.orf_frame_contrast,
+        orf_reference_evaluated: orf_diff.orf_reference_evaluated,
+        orf_reference_matched: orf_diff.orf_reference_matched,
+        orf_reference_identity: orf_diff.orf_reference_identity,
+        orf_reference_coverage: orf_diff.orf_reference_coverage,
+        orf_intron_length: orf_diff.orf_intron_length,
         raw_num_taxa,
         raw_length,
         raw_gap_percent: diff.old_gap_percent,
@@ -457,6 +478,19 @@ pub fn summarize_alignment(
             .taxa
             .iter()
             .zip(trimmed.sequences.iter())
+            .map(|(taxon, sequence)| {
+                let basepairs = sequence
+                    .bytes()
+                    .filter(|state| !matches!(state, b'-' | b'?' | b'N' | b'n'))
+                    .count();
+                (taxon.clone(), basepairs)
+            })
+            .collect(),
+        orf_retained_taxa: orf_alignment.taxa.clone(),
+        orf_retained_taxon_basepairs: orf_alignment
+            .taxa
+            .iter()
+            .zip(orf_alignment.sequences.iter())
             .map(|(taxon, sequence)| {
                 let basepairs = sequence
                     .bytes()
@@ -635,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_recalculation_applies_orf_before_assessment() {
+    fn test_orf_sample_pruning_does_not_change_catalog_assessment() {
         let alignment = Alignment::new(
             "exon_001".to_string(),
             "exon_001.fa".to_string(),
@@ -683,17 +717,12 @@ mod tests {
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(progress_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(summaries[0].num_taxa, 3);
-        assert!(!summaries[0].pass);
-        assert!(summaries[0]
-            .fail_reasons
-            .iter()
-            .any(|reason| reason.contains("Taxa count (3 < min 4)")));
-        assert!(!summaries[0]
-            .fail_reasons
-            .iter()
-            .any(|reason| reason.starts_with("ORF check failed")));
-        assert_eq!(overview.discarded_alignments, 1);
+        assert_eq!(summaries[0].num_taxa, 4);
+        assert!(summaries[0].pass);
+        assert!(summaries[0].fail_reasons.is_empty());
+        assert_eq!(summaries[0].orf_retained_samples, 3);
+        assert_eq!(summaries[0].orf_retained_taxa.len(), 3);
+        assert_eq!(overview.passed_alignments, 1);
     }
 
     #[test]
