@@ -314,6 +314,10 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
   const [scrollX, setScrollX] = useState<number>(0);
   const [scrollY, setScrollY] = useState<number>(0);
 
+  // Mouse Drag Panning State
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
+
   // User-customizable Taxa Column Width
   const [customTaxaWidth, setCustomTaxaWidth] = useState<number | null>(null);
   const [isResizingDivider, setIsResizingDivider] = useState<boolean>(false);
@@ -812,8 +816,34 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     }
   };
 
-  // Mouse Move for Cell Hover Info
+  const handleMouseDownCanvas = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    setIsDragging(true);
+    lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const handleMouseUpCanvas = () => {
+    setIsDragging(false);
+    lastMousePosRef.current = null;
+  };
+
+  // Mouse Move for Cell Hover Info and Panning
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isDragging && lastMousePosRef.current) {
+      const dx = e.clientX - lastMousePosRef.current.x;
+      const dy = e.clientY - lastMousePosRef.current.y;
+
+      setScrollX((prev) =>
+        Math.max(0, Math.min(length * charWidth, prev - dx))
+      );
+      setScrollY((prev) =>
+        Math.max(0, Math.min(numTaxa * charHeight, prev - dy))
+      );
+
+      lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+      setHoverInfo(null);
+      return;
+    }
+
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
@@ -886,6 +916,8 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
 
   const handleMouseLeave = () => {
     setHoverInfo(null);
+    setIsDragging(false);
+    lastMousePosRef.current = null;
   };
 
   return (
@@ -1184,11 +1216,15 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
       <div
         ref={containerRef}
         onWheel={handleWheel}
-        className="flex-1 w-full h-full relative overflow-hidden bg-[#0e1014] cursor-crosshair"
+        className={`flex-1 w-full h-full relative overflow-hidden bg-[#0e1014] ${
+          isDragging ? 'cursor-grabbing' : 'cursor-crosshair'
+        }`}
       >
         <canvas
           ref={canvasRef}
           onMouseMove={handleMouseMove}
+          onMouseDown={handleMouseDownCanvas}
+          onMouseUp={handleMouseUpCanvas}
           onMouseLeave={handleMouseLeave}
           className="w-full h-full block"
         />
