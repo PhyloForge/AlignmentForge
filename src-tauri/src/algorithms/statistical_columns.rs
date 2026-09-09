@@ -421,7 +421,7 @@ mod tests {
             "AAAAACTG".to_string(),
             "AAAAGTCA".to_string(),
         ];
-        let (trimmed, dropped, _) = trim_statistical_columns(
+        let (_trimmed, dropped, _) = trim_statistical_columns(
             &seqs,
             StatisticalColumnMethod::Entropy,
             0.50,

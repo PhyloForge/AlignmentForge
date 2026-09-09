@@ -13,6 +13,8 @@ import {
   CheckCircle,
   XCircle,
   Languages,
+  ArrowLeft,
+  ArrowRight,
 } from 'lucide-react';
 import {
   AlignmentViewResponse,
@@ -22,7 +24,7 @@ import {
   GeneticCode,
   StopCodonPos,
 } from '../types';
-import { translateClientCodon } from '../parsers/clientParser';
+import { translateClientCodon } from '../sequenceDisplay';
 
 interface MsaViewerProps {
   viewData: AlignmentViewResponse;
@@ -33,6 +35,16 @@ interface MsaViewerProps {
   geneticCode: GeneticCode;
   aminoAcidViewerSettings: AminoAcidViewerSettings;
   onChangeAminoAcidViewerSettings: (settings: AminoAcidViewerSettings) => void;
+  /** Samples the user has dropped by hand, across the whole dataset. */
+  discardedTaxa?: string[];
+  onToggleDiscardTaxon?: (taxon: string) => void;
+  /** Held by the parent so a recipe change does not clear the selection. */
+  selectedTaxon: string | null;
+  onSelectTaxon: (taxon: string | null) => void;
+  /** Step through the loci in the order the list view is showing them. */
+  onPreviousAlignment?: () => void;
+  onNextAlignment?: () => void;
+  alignmentPosition?: { index: number; total: number };
 }
 
 export type OverlayColorOption = 'grey' | 'slate' | 'amber' | 'red' | 'dark';
@@ -268,6 +280,12 @@ function calculateViewerConsensus(sequences: string[]): string {
   return consensus;
 }
 
+// Row selection colours. Kept blue so a selected row is never confused with a
+// masking or trimming overlay, none of which use blue.
+const SELECTION_FILL = 'rgba(56, 189, 248, 0.16)';
+const SELECTION_STROKE = 'rgba(56, 189, 248, 0.85)';
+const SELECTION_NAME_FILL = 'rgba(56, 189, 248, 0.22)';
+
 const OVERLAY_COLORS: Record<OverlayColorOption, { fill: string; stroke: string; label: string }> = {
   grey: {
     fill: 'rgba(71, 85, 105, 0.78)', // Muted Slate Grey (Default)
@@ -305,6 +323,13 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
   geneticCode,
   aminoAcidViewerSettings,
   onChangeAminoAcidViewerSettings,
+  discardedTaxa,
+  onToggleDiscardTaxon,
+  selectedTaxon,
+  onSelectTaxon,
+  onPreviousAlignment,
+  onNextAlignment,
+  alignmentPosition,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -317,6 +342,9 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
   // Mouse Drag Panning State
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
+  /** Distance travelled while the button was down, to tell a click from a pan. */
+  const dragDistanceRef = useRef<number>(0);
+
 
   // User-customizable Taxa Column Width
   const [customTaxaWidth, setCustomTaxaWidth] = useState<number | null>(null);
@@ -347,6 +375,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
   } | null>(null);
 
   const { raw_alignment, trimmed_alignment, diff, pis_mask, majority_consensus } = viewData;
+  const discardedSet = useMemo(() => new Set(discardedTaxa ?? []), [discardedTaxa]);
 
   const aminoAcidAvailable = Boolean(
     diff.orf_evaluated &&
@@ -403,6 +432,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     if (effectiveViewMode !== 'overlays') setShowColorMenu(false);
   }, [effectiveViewMode]);
 
+
   // Stop codons list
   const stopCodonsList = useMemo(() => {
     if (aminoAcidMode) return [];
@@ -448,6 +478,34 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
 
   const taxaNameWidth = customTaxaWidth ?? autoTaxaWidth;
   const topHeaderHeight = 44; // Ruler + PIS + Consensus row
+
+  // Scrolling must stop when the last column or row reaches the viewport edge.
+  // Clamping to the full content size instead lets the view run a whole screen
+  // past the alignment into blank space.
+  const clampScrollX = useCallback(
+    (value: number) => {
+      const viewportWidth = (canvasRef.current?.clientWidth ?? 0) - taxaNameWidth;
+      const maxScroll = Math.max(0, length * charWidth - Math.max(0, viewportWidth));
+      return Math.max(0, Math.min(maxScroll, value));
+    },
+    [length, charWidth, taxaNameWidth]
+  );
+
+  const clampScrollY = useCallback(
+    (value: number) => {
+      const viewportHeight = (canvasRef.current?.clientHeight ?? 0) - topHeaderHeight;
+      const maxScroll = Math.max(0, numTaxa * charHeight - Math.max(0, viewportHeight));
+      return Math.max(0, Math.min(maxScroll, value));
+    },
+    [numTaxa, charHeight, topHeaderHeight]
+  );
+
+  // Zooming out shrinks the content, which can leave the previous offset past
+  // the new end of the alignment.
+  useEffect(() => {
+    setScrollX((prev) => clampScrollX(prev));
+    setScrollY((prev) => clampScrollY(prev));
+  }, [clampScrollX, clampScrollY]);
 
   // Handle Drag Resizing of Taxon Column Divider
   const handleDividerMouseDown = (e: React.MouseEvent) => {
@@ -650,6 +708,22 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         ctx.fillStyle = activeOverlay.fill;
         ctx.fillRect(taxaNameWidth, rowY, width - taxaNameWidth, charHeight);
       }
+
+      // Selected row. Deliberately a blue tint: every masking and trimming
+      // overlay uses grey, slate, amber, red or near-black, so a selection can
+      // never be read as a mask.
+      if (taxonName === selectedTaxon) {
+        ctx.fillStyle = SELECTION_FILL;
+        ctx.fillRect(taxaNameWidth, rowY, width - taxaNameWidth, charHeight);
+        ctx.strokeStyle = SELECTION_STROKE;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(taxaNameWidth, rowY + 0.75);
+        ctx.lineTo(width, rowY + 0.75);
+        ctx.moveTo(taxaNameWidth, rowY + charHeight - 0.75);
+        ctx.lineTo(width, rowY + charHeight - 0.75);
+        ctx.stroke();
+      }
     }
 
     // 2. Draw Left Taxa Name Column (Pinned Sticky Left with Clean Divider)
@@ -669,8 +743,13 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
       const isDropped = effectiveViewMode === 'overlays' && droppedTaxaSet.has(taxonName);
       const rowY = topHeaderHeight + (r * charHeight - scrollY);
 
-      // Alternating row background
-      ctx.fillStyle = r % 2 === 0 ? '#171b22' : '#14171d';
+      // Alternating row background, or the selection tint
+      const isSelected = taxonName === selectedTaxon;
+      ctx.fillStyle = isSelected
+        ? SELECTION_NAME_FILL
+        : r % 2 === 0
+        ? '#171b22'
+        : '#14171d';
       ctx.fillRect(0, rowY, taxaNameWidth - 1, charHeight);
 
       // Row separator
@@ -693,8 +772,21 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         ctx.moveTo(10, rowY + charHeight / 2);
         ctx.lineTo(10 + Math.min(textWidth, taxaNameWidth - 20), rowY + charHeight / 2);
         ctx.stroke();
+      } else if (discardedSet.has(taxonName)) {
+        // Discarded by hand: shown struck through so the choice is visible even
+        // when the sample still appears in the raw overlay.
+        ctx.fillStyle = '#f0abfc';
+        const label = `⊘ ${taxonName}`;
+        ctx.fillText(label, 10, rowY + charHeight / 2);
+        const textWidth = ctx.measureText(label).width;
+        ctx.strokeStyle = '#f0abfc';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(10, rowY + charHeight / 2);
+        ctx.lineTo(10 + Math.min(textWidth, taxaNameWidth - 20), rowY + charHeight / 2);
+        ctx.stroke();
       } else {
-        ctx.fillStyle = '#dce6ff';
+        ctx.fillStyle = isSelected ? '#e0f2fe' : '#dce6ff';
         ctx.fillText(taxonName, 10, rowY + charHeight / 2);
       }
     }
@@ -795,6 +887,8 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     aminoAcidMode,
     aminoAcidViewerSettings.colorScheme,
     aminoAcidViewerSettings.dimConsensusMatches,
+    selectedTaxon,
+    discardedSet,
   ]);
 
   // Mouse Wheel Pan / Scroll
@@ -807,23 +901,34 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         setCharWidth((w) => Math.max(1, w - 1));
       }
     } else {
-      setScrollX((prev) =>
-        Math.max(0, Math.min(length * charWidth, prev + e.deltaX))
-      );
-      setScrollY((prev) =>
-        Math.max(0, Math.min(numTaxa * charHeight, prev + e.deltaY))
-      );
+      setScrollX((prev) => clampScrollX(prev + e.deltaX));
+      setScrollY((prev) => clampScrollY(prev + e.deltaY));
     }
   };
 
   const handleMouseDownCanvas = (e: React.MouseEvent<HTMLCanvasElement>) => {
     setIsDragging(true);
+    dragDistanceRef.current = 0;
     lastMousePosRef.current = { x: e.clientX, y: e.clientY };
   };
 
-  const handleMouseUpCanvas = () => {
+  const handleMouseUpCanvas = (e: React.MouseEvent<HTMLCanvasElement>) => {
     setIsDragging(false);
     lastMousePosRef.current = null;
+
+    // A press that barely moved is a click, not a pan. Clicking a sample name
+    // selects that row; clicking it again clears the selection.
+    if (dragDistanceRef.current > 4) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    if (mouseX > taxaNameWidth || mouseY <= topHeaderHeight) return;
+
+    const row = Math.floor((mouseY - topHeaderHeight + scrollY) / charHeight);
+    const taxon = activeTaxa[row];
+    if (!taxon) return;
+    onSelectTaxon(selectedTaxon === taxon ? null : taxon);
   };
 
   // Mouse Move for Cell Hover Info and Panning
@@ -831,13 +936,10 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     if (isDragging && lastMousePosRef.current) {
       const dx = e.clientX - lastMousePosRef.current.x;
       const dy = e.clientY - lastMousePosRef.current.y;
+      dragDistanceRef.current += Math.abs(dx) + Math.abs(dy);
 
-      setScrollX((prev) =>
-        Math.max(0, Math.min(length * charWidth, prev - dx))
-      );
-      setScrollY((prev) =>
-        Math.max(0, Math.min(numTaxa * charHeight, prev - dy))
-      );
+      setScrollX((prev) => clampScrollX(prev - dx));
+      setScrollY((prev) => clampScrollY(prev - dy));
 
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
       setHoverInfo(null);
@@ -1141,6 +1243,38 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         )}
       </div>
 
+      {/* Selected sample actions */}
+      {selectedTaxon && (
+        <div className="flex-none px-4 py-1.5 border-b border-sky-500/25 bg-sky-500/[0.07] flex items-center gap-3 text-[11px]">
+          <span className="font-mono font-semibold text-sky-200 truncate">{selectedTaxon}</span>
+          {discardedSet.has(selectedTaxon) ? (
+            <span className="text-fuchsia-300">Discarded from every locus</span>
+          ) : (
+            <span className="text-[#8b949e]">Selected</span>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            {onToggleDiscardTaxon && (
+              <button
+                onClick={() => onToggleDiscardTaxon(selectedTaxon)}
+                className={`px-2.5 py-1 rounded border text-[11px] font-medium transition-colors ${
+                  discardedSet.has(selectedTaxon)
+                    ? 'border-[#3a4250] bg-[#1f242e] text-[#c9d1d9] hover:bg-[#2a313d]'
+                    : 'border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-300 hover:bg-fuchsia-500/20'
+                }`}
+              >
+                {discardedSet.has(selectedTaxon) ? 'Restore Sample' : 'Discard Sample'}
+              </button>
+            )}
+            <button
+              onClick={() => onSelectTaxon(null)}
+              className="px-2 py-1 rounded border border-[#3a4250] bg-[#1f242e] text-[#8b949e] hover:text-[#c9d1d9] hover:bg-[#2a313d] text-[11px]"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       {(diff.orf_evaluated ||
         diff.orf_reference_evaluated ||
         !diff.pass ||
@@ -1228,6 +1362,41 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
           onMouseLeave={handleMouseLeave}
           className="w-full h-full block"
         />
+
+        {/* Step to the previous or next alignment, in the order the list view
+            was showing. Sits over the matrix so it stays reachable while the
+            canvas is scrolled. */}
+        {(alignmentPosition || onPreviousAlignment || onNextAlignment) && (
+          <div className="absolute bottom-3 right-3 z-30 flex items-center gap-1.5 rounded-lg border border-[#2d3545] bg-[#14171d]/95 px-1.5 py-1 shadow-lg backdrop-blur-sm">
+            {alignmentPosition && (
+              <span className="px-1 font-mono text-[10px] text-[#8b949e] tabular-nums">
+                {alignmentPosition.index}/{alignmentPosition.total}
+              </span>
+            )}
+            <button
+              onClick={onPreviousAlignment}
+              disabled={!onPreviousAlignment}
+              aria-label="Previous alignment"
+              className="group relative rounded p-1.5 text-[#c9d1d9] transition-colors hover:bg-[#232a36] hover:text-[#dce6ff] disabled:cursor-not-allowed disabled:text-[#4b5563] disabled:hover:bg-transparent"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              <span className="pointer-events-none absolute bottom-full right-0 mb-1.5 hidden whitespace-nowrap rounded border border-[#2d3545] bg-[#1b2029] px-2 py-1 text-[10px] font-medium text-[#dce6ff] shadow-lg group-hover:block">
+                Previous alignment
+              </span>
+            </button>
+            <button
+              onClick={onNextAlignment}
+              disabled={!onNextAlignment}
+              aria-label="Next alignment"
+              className="group relative rounded p-1.5 text-[#c9d1d9] transition-colors hover:bg-[#232a36] hover:text-[#dce6ff] disabled:cursor-not-allowed disabled:text-[#4b5563] disabled:hover:bg-transparent"
+            >
+              <ArrowRight className="h-4 w-4" />
+              <span className="pointer-events-none absolute bottom-full right-0 mb-1.5 hidden whitespace-nowrap rounded border border-[#2d3545] bg-[#1b2029] px-2 py-1 text-[10px] font-medium text-[#dce6ff] shadow-lg group-hover:block">
+                Next alignment
+              </span>
+            </button>
+          </div>
+        )}
 
         {/* Draggable Divider Handle between Taxon Names and Sequence Grid */}
         <div

@@ -3,11 +3,30 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use crate::models::{Alignment, AlignmentFormat};
+use crate::parsers::validate_alignment_shape;
 
 pub fn parse_nexus<P: AsRef<Path>>(path: P) -> Result<Alignment, String> {
     let path_ref = path.as_ref();
     let content = fs::read_to_string(path_ref)
         .map_err(|e| format!("Failed to read NEXUS file: {}", e))?;
+    let file_name = path_ref
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let id = path_ref
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    parse_nexus_str(&content, &id, &file_name, &path_ref.to_string_lossy())
+}
+
+/// Parses NEXUS from memory, for callers with no filesystem.
+pub fn parse_nexus_str(
+    content: &str,
+    id: &str,
+    file_name: &str,
+    file_path: &str,
+) -> Result<Alignment, String> {
 
     let mut in_matrix = false;
     let mut taxa: Vec<String> = Vec::new();
@@ -54,19 +73,12 @@ pub fn parse_nexus<P: AsRef<Path>>(path: P) -> Result<Alignment, String> {
         return Err("No matrix data found in NEXUS file".to_string());
     }
 
-    let file_name = path_ref
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let id = path_ref
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    validate_alignment_shape(&taxa, &sequences, None, "NEXUS")?;
 
     Ok(Alignment::new(
-        id,
-        file_name,
-        path_ref.to_string_lossy().to_string(),
+        id.to_string(),
+        file_name.to_string(),
+        file_path.to_string(),
         AlignmentFormat::Nexus,
         taxa,
         sequences,

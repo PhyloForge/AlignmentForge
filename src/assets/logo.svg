@@ -122,7 +122,7 @@
     <!-- Matrix Container Backdrop -->
     <rect x="-12" y="-12" width="344" height="264" rx="16" fill="#0f172a" stroke="#1e293b" stroke-width="4" filter="url(#blockGlow)"/>
 
-    <!-- ROW 1 (Taxon 1): A  A  C  G  [C]  <-- Staggered SNP in Column 5 -->
+    <!-- ROW 1 (Taxon 1): A  A  C  G  [C]  Staggered SNP in Column 5 -->
     <!-- Col 1: A (Green) -->
     <rect x="0" y="0" width="56" height="52" rx="8" fill="url(#nucA)"/>
     <text x="28" y="36" font-family="-apple-system, monospace, sans-serif" font-weight="900" font-size="30" fill="#ffffff" text-anchor="middle">A</text>
@@ -140,7 +140,7 @@
     <text x="284" y="36" font-family="-apple-system, monospace, sans-serif" font-weight="900" font-size="30" fill="#ffffff" text-anchor="middle">C</text>
 
 
-    <!-- ROW 2 (Taxon 2): A  A  C  [A]  T  <-- Staggered SNP in Column 4 -->
+    <!-- ROW 2 (Taxon 2): A  A  C  [A]  T  Staggered SNP in Column 4 -->
     <!-- Col 1: A (Green) -->
     <rect x="0" y="60" width="56" height="52" rx="8" fill="url(#nucA)"/>
     <text x="28" y="96" font-family="-apple-system, monospace, sans-serif" font-weight="900" font-size="30" fill="#ffffff" text-anchor="middle">A</text>

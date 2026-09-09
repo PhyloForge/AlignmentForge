@@ -266,6 +266,8 @@ export interface TrimmingRecipe {
   min_coverage_percent: number;
   relative_width: RelativeWidth;
   min_sample_locus_occupancy_percent: number;
+  /** Samples the user chose to drop by hand. */
+  discarded_taxa?: string[];
   excluded_taxa?: string[];
 
   assess_alignment: boolean;
@@ -279,10 +281,18 @@ export interface TrimmingRecipe {
   min_variable_percent: number;
 }
 
+/** A file that was found but could not be parsed. */
+export interface ParseFailure {
+  file_name: string;
+  file_path: string;
+  error: string;
+}
+
 export interface ScanResponse {
   summaries: AlignmentSummary[];
   overview: DatasetOverview;
   occupancy: TaxonOccupancy[];
+  parse_failures?: ParseFailure[];
 }
 
 export interface CatalogUpdateResponse {

@@ -129,6 +129,15 @@ pub fn serialize_filter_config(recipe: &TrimmingRecipe) -> Result<String, String
 # Fractions use 0 to 1; percentage fields use 0 to 100.\n",
     );
 
+    // Reference sequences are deliberately not stored here. Say so in the file,
+    // so a user who reloads this config knows to load the references again.
+    if !recipe.orf_reference_sequences.is_empty() {
+        output.push_str(&format!(
+            "#\n# NOTE: {} ORF reference sequences are NOT saved in this file.\n# Load your reference file again after you load this configuration.\n",
+            recipe.orf_reference_sequences.len()
+        ));
+    }
+
     for line in body.lines() {
         let key = line
             .split_once('=')
@@ -144,6 +153,11 @@ pub fn serialize_filter_config(recipe: &TrimmingRecipe) -> Result<String, String
     }
 
     Ok(output)
+}
+
+/// True when saving this recipe would leave reference sequences behind.
+pub fn drops_reference_sequences(recipe: &TrimmingRecipe) -> bool {
+    !recipe.orf_reference_sequences.is_empty()
 }
 
 pub fn parse_filter_config(contents: &str) -> Result<TrimmingRecipe, String> {

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpDown, CheckCircle, Dna, Eye, Loader2, Search, XCircle, CheckSquare } from 'lucide-react';
 import { AlignmentSummary, OrfSearchMode } from '../types';
-import { shouldSkipOrfLocus } from '../parsers/clientParser';
+import { shouldSkipOrfLocus } from '../sequenceDisplay';
 
 interface OrfAnalysisViewProps {
   summaries: AlignmentSummary[];
@@ -15,6 +15,7 @@ interface OrfAnalysisViewProps {
   orfSearchMode?: OrfSearchMode;
   skipNonCodingOrf?: boolean;
   onSelectLocus: (id: string, filePath: string) => void;
+  onVisibleOrderChange?: (filePaths: string[]) => void;
   selectedPaths: Set<string>;
   onSelectPath: (path: string, selected: boolean) => void;
   onSelectAllPaths: () => void;
@@ -67,6 +68,7 @@ const OrfAnalysisView: React.FC<OrfAnalysisViewProps> = ({
   orfSearchMode = 'continuouscds',
   skipNonCodingOrf = true,
   onSelectLocus,
+  onVisibleOrderChange,
   selectedPaths,
   onSelectPath,
   onSelectAllPaths,
@@ -128,6 +130,12 @@ const OrfAnalysisView: React.FC<OrfAnalysisViewProps> = ({
       return sortAsc ? comparison : -comparison;
     });
   }, [summaries, searchTerm, statusFilter, sortField, sortAsc, skipNonCodingOrf, orfSearchMode]);
+
+  // Report the visible order so the alignment viewer steps through these loci
+  // in the order shown here.
+  useEffect(() => {
+    onVisibleOrderChange?.(rows.map((row) => row.file_path));
+  }, [rows, onVisibleOrderChange]);
 
   const counts = useMemo(() => {
     let accepted = 0;

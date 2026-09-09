@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Settings2, ShieldCheck, Palette, Target, Play, Upload, Trash2, Dna, RotateCcw } from 'lucide-react';
+import { Settings2, ShieldCheck, Palette, Target, Play, Upload, Trash2, Dna, RotateCcw, ChevronDown, ChevronRight } from 'lucide-react';
 import { 
   TrimmingRecipe, 
   StopCodonAction, 
@@ -18,6 +18,14 @@ interface OrfAnalysisSidebarProps {
   onChangeAminoAcidViewerSettings: (settings: AminoAcidViewerSettings) => void;
 }
 
+/**
+ * Upper bound for a count slider. A configuration file can hold a value above
+ * the usual range, and a fixed `max` would snap it down as soon as the user
+ * touched the control. Widening the track to fit keeps the loaded value intact.
+ */
+const sliderMax = (standardMax: number, currentValue: number | undefined): number =>
+  Math.max(standardMax, Math.ceil(currentValue ?? 0));
+
 export function OrfAnalysisSidebar({
   recipe,
   onChangeRecipe,
@@ -26,6 +34,17 @@ export function OrfAnalysisSidebar({
   aminoAcidViewerSettings,
   onChangeAminoAcidViewerSettings
 }: OrfAnalysisSidebarProps) {
+  // Sections start closed, matching the filtering sidebar.
+  const [collapsedSections, setCollapsedSections] = React.useState<Record<string, boolean>>({
+    analysis_modes: true,
+    reference_guided_exons_introns: true,
+    codon_qc: true,
+    amino_acid_viewer: true,
+  });
+
+  const toggleSection = (key: string) =>
+    setCollapsedSections((current) => ({ ...current, [key]: !current[key] }));
+
   const update = <K extends keyof TrimmingRecipe>(key: K, value: TrimmingRecipe[K]) => {
     onChangeRecipe({ ...recipe, [key]: value });
   };
@@ -116,14 +135,23 @@ export function OrfAnalysisSidebar({
           ) : (
             <div className="space-y-6">
               
-              <div className="shrink-0 border border-[#2d3545] rounded-lg bg-[#1f242e]/30 overflow-hidden">
-                <div className="w-full px-3 py-2 bg-[#2d3545]/30 flex items-center text-[#c9d1d9] font-medium text-xs">
+              <div className="shrink-0 border border-purple-500/30 rounded-lg bg-purple-500/[0.035] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => toggleSection('analysis_modes')}
+                  className="w-full px-3 py-2 bg-purple-500/[0.08] flex items-center justify-between text-purple-200 font-medium text-xs">
                   <div className="flex items-center gap-2">
-                    <Settings2 className="w-4 h-4 text-[#8b949e]" />
-                    <span>Analysis Modes</span>
+                    <Settings2 className="w-4 h-4 text-purple-400" />
+                    <span className="font-semibold text-purple-300">Analysis Modes</span>
                   </div>
-                </div>
-                <div className="p-3 space-y-3">
+                  {collapsedSections['analysis_modes'] ? (
+                    <ChevronRight className="w-3.5 h-3.5 text-purple-400/70" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-purple-400/70" />
+                  )}
+                </button>
+                {!collapsedSections['analysis_modes'] && (
+                  <div className="p-3 space-y-3">
                   <div>
                     <label className="text-[11px] text-[#8b949e] block mb-1">ORF Search Mode</label>
                     <select
@@ -142,16 +170,26 @@ export function OrfAnalysisSidebar({
                   </div>
                   
                 </div>
+                )}
               </div>
 
-              <div className="shrink-0 border border-blue-500/30 rounded-lg bg-blue-500/[0.035] overflow-hidden">
-                <div className="w-full px-3 py-2 bg-blue-500/[0.08] flex items-center text-blue-200 font-medium text-xs">
+              <div className="shrink-0 border border-pink-500/30 rounded-lg bg-pink-500/[0.035] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => toggleSection('reference_guided_exons_introns')}
+                  className="w-full px-3 py-2 bg-pink-500/[0.08] flex items-center justify-between text-pink-200 font-medium text-xs">
                   <div className="flex items-center gap-2">
-                    <Target className="w-4 h-4 text-blue-400" />
-                    <span>Reference-Guided Exons & Introns</span>
+                    <Target className="w-4 h-4 text-pink-400" />
+                    <span className="font-semibold text-pink-300">Reference-Guided Exons & Introns</span>
                   </div>
-                </div>
-                <div className="p-3 space-y-3">
+                  {collapsedSections['reference_guided_exons_introns'] ? (
+                    <ChevronRight className="w-3.5 h-3.5 text-pink-400/70" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-pink-400/70" />
+                  )}
+                </button>
+                {!collapsedSections['reference_guided_exons_introns'] && (
+                  <div className="p-3 space-y-3">
                   <input 
                     type="file" 
                     ref={fileInputRef}
@@ -164,7 +202,7 @@ export function OrfAnalysisSidebar({
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex items-center justify-center gap-1.5 rounded border border-blue-500/30 bg-blue-500/10 px-2 py-1.5 text-[11px] font-medium text-blue-300 hover:bg-blue-500/20"
+                      className="inline-flex items-center justify-center gap-1.5 rounded border border-[#3a4250] bg-[#1f242e] px-2 py-1.5 text-[11px] font-medium text-[#c9d1d9] hover:bg-[#2a313d]"
                     >
                       <Upload className="w-3 h-3" /> Load FASTA
                     </button>
@@ -187,22 +225,32 @@ export function OrfAnalysisSidebar({
                   </div>
                   <div className="flex items-center justify-between rounded bg-[#101319] px-2 py-1.5 text-[11px]">
                     <span className="text-[#8b949e]">Loaded reference loci</span>
-                    <span className="font-mono font-semibold text-blue-300">{refCount}</span>
+                    <span className="font-mono font-semibold text-pink-300">{refCount}</span>
                   </div>
                   <p className="text-[10px] leading-snug text-[#8b949e]">
                     Load reference FASTA sequences here to guide intron boundaries and frame translations.
                   </p>
                 </div>
+                )}
               </div>
 
-              <div className="shrink-0 border border-[#2d3545] rounded-lg bg-[#1f242e]/30 overflow-hidden">
-                <div className="w-full px-3 py-2 bg-[#2d3545]/30 flex items-center text-[#c9d1d9] font-medium text-xs">
+              <div className="shrink-0 border border-teal-500/30 rounded-lg bg-teal-500/[0.035] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => toggleSection('codon_qc')}
+                  className="w-full px-3 py-2 bg-teal-500/[0.08] flex items-center justify-between text-teal-200 font-medium text-xs">
                   <div className="flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-[#8b949e]" />
-                    <span>Codon QC</span>
+                    <ShieldCheck className="w-4 h-4 text-teal-400" />
+                    <span className="font-semibold text-teal-300">Codon QC</span>
                   </div>
-                </div>
-                <div className="p-3 space-y-3">
+                  {collapsedSections['codon_qc'] ? (
+                    <ChevronRight className="w-3.5 h-3.5 text-teal-400/70" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-teal-400/70" />
+                  )}
+                </button>
+                {!collapsedSections['codon_qc'] && (
+                  <div className="p-3 space-y-3">
                   
                   <div>
                     <label className="text-[11px] text-[#8b949e] block mb-1">Genetic code</label>
@@ -224,7 +272,7 @@ export function OrfAnalysisSidebar({
                         type="checkbox"
                         checked={recipe.macse_trim_terminal ?? true}
                         onChange={(e) => update('macse_trim_terminal', e.target.checked)}
-                        className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500 focus:ring-0"
+                        className="rounded bg-[#1f242e] border-[#2d3545] text-teal-500 focus:ring-0"
                       />
                     </label>
 
@@ -232,32 +280,32 @@ export function OrfAnalysisSidebar({
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Max Frameshifts / Sample</span>
-                          <span className="font-mono text-emerald-400 font-semibold">{recipe.macse_max_internal_sample ?? 3}</span>
+                          <span className="font-mono text-teal-400 font-semibold">{recipe.macse_max_internal_sample ?? 3}</span>
                         </div>
                         <input
                           type="range"
                           min="0"
-                          max="20"
+                          max={sliderMax(20, recipe.macse_max_internal_sample ?? 3)}
                           step="1"
                           value={recipe.macse_max_internal_sample ?? 3}
                           onChange={(e) => update('macse_max_internal_sample', parseInt(e.target.value))}
-                          className="w-full accent-emerald-500"
+                          className="w-full accent-teal-500"
                         />
                       </div>
 
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Max Frameshift Cols / Locus</span>
-                          <span className="font-mono text-emerald-400 font-semibold">{recipe.macse_max_internal_locus ?? 10}</span>
+                          <span className="font-mono text-teal-400 font-semibold">{recipe.macse_max_internal_locus ?? 10}</span>
                         </div>
                         <input
                           type="range"
                           min="0"
-                          max="50"
+                          max={sliderMax(50, recipe.macse_max_internal_locus ?? 10)}
                           step="1"
                           value={recipe.macse_max_internal_locus ?? 10}
                           onChange={(e) => update('macse_max_internal_locus', parseInt(e.target.value))}
-                          className="w-full accent-emerald-500"
+                          className="w-full accent-teal-500"
                         />
                       </div>
 
@@ -269,54 +317,64 @@ export function OrfAnalysisSidebar({
                               type="checkbox"
                               checked={recipe.stop_codon_action === 'maskcodon'}
                               onChange={(e) => update('stop_codon_action', e.target.checked ? 'maskcodon' : 'removesample')}
-                              className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500 focus:ring-0"
+                              className="rounded bg-[#1f242e] border-[#2d3545] text-teal-500 focus:ring-0"
                             />
                           </label>
 
                         </div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Max Stop Codons / Sample</span>
-                          <span className="font-mono text-rose-400 font-semibold">{recipe.max_stop_codons_sample ?? 2}</span>
+                          <span className="font-mono text-teal-400 font-semibold">{recipe.max_stop_codons_sample ?? 2}</span>
                         </div>
                         <input
                           type="range"
                           min="0"
-                          max="10"
+                          max={sliderMax(10, recipe.max_stop_codons_sample ?? 2)}
                           step="1"
                           value={recipe.max_stop_codons_sample ?? 2}
                           onChange={(e) => update('max_stop_codons_sample', parseInt(e.target.value))}
-                          className="w-full accent-rose-500"
+                          className="w-full accent-teal-500"
                         />
                       </div>
 
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Max Stop Codons / Locus</span>
-                          <span className="font-mono text-rose-400 font-semibold">{recipe.max_stop_codons_locus ?? 5}</span>
+                          <span className="font-mono text-teal-400 font-semibold">{recipe.max_stop_codons_locus ?? 5}</span>
                         </div>
                         <input
                           type="range"
                           min="0"
-                          max="20"
+                          max={sliderMax(20, recipe.max_stop_codons_locus ?? 5)}
                           step="1"
                           value={recipe.max_stop_codons_locus ?? 5}
                           onChange={(e) => update('max_stop_codons_locus', parseInt(e.target.value))}
-                          className="w-full accent-rose-500"
+                          className="w-full accent-teal-500"
                         />
                       </div>
                     </div>
                   </div>
                 </div>
+                )}
               </div>
 
-              <div className="shrink-0 border border-violet-500/30 rounded-lg bg-violet-500/[0.035] overflow-hidden">
-                <div className="w-full px-3 py-2 bg-violet-500/[0.08] flex items-center text-violet-200 font-medium text-xs">
+              <div className="shrink-0 border border-orange-500/30 rounded-lg bg-orange-500/[0.035] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => toggleSection('amino_acid_viewer')}
+                  className="w-full px-3 py-2 bg-orange-500/[0.08] flex items-center justify-between text-orange-200 font-medium text-xs">
                   <div className="flex items-center gap-2">
-                    <Palette className="w-4 h-4 text-violet-400" />
-                    <span>Amino Acid Viewer</span>
+                    <Palette className="w-4 h-4 text-orange-400" />
+                    <span className="font-semibold text-orange-300">Amino Acid Viewer</span>
                   </div>
-                </div>
-                <div className="p-3 space-y-3">
+                  {collapsedSections['amino_acid_viewer'] ? (
+                    <ChevronRight className="w-3.5 h-3.5 text-orange-400/70" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-orange-400/70" />
+                  )}
+                </button>
+                {!collapsedSections['amino_acid_viewer'] && (
+                  <div className="p-3 space-y-3">
                   <button
                     type="button"
                     onClick={() => onChangeAminoAcidViewerSettings({
@@ -324,16 +382,16 @@ export function OrfAnalysisSidebar({
                       enabled: !aminoAcidViewerSettings.enabled
                     })}
                     className={`w-full rounded border px-2.5 py-2 text-[11px] font-semibold transition-colors ${
-                      aminoAcidViewerSettings.enabled 
-                        ? 'border-violet-400/50 bg-violet-500/25 text-violet-100 hover:bg-violet-500/30' 
-                        : 'border-violet-500/30 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20'
+                      aminoAcidViewerSettings.enabled
+                        ? 'border-[#4a5361] bg-[#2a313d] text-[#dce6ff] hover:bg-[#333c4a]'
+                        : 'border-[#3a4250] bg-[#1f242e] text-[#c9d1d9] hover:bg-[#2a313d]'
                     }`}
                   >
                     {aminoAcidViewerSettings.enabled ? 'Return Viewer to Nucleotides' : 'Convert Viewer to Amino Acids'}
                   </button>
                   
                   {aminoAcidViewerSettings.enabled && (
-                    <div className="space-y-2.5 border-t border-violet-500/15 pt-2.5">
+                    <div className="space-y-2.5 border-t border-orange-500/15 pt-2.5">
                       <div>
                         <label className="text-[11px] text-[#8b949e] block mb-1">Color palette</label>
                         <select
@@ -361,12 +419,13 @@ export function OrfAnalysisSidebar({
                             ...aminoAcidViewerSettings,
                             dimConsensusMatches: event.target.checked,
                           })}
-                          className="rounded bg-[#1f242e] border-[#2d3545] text-violet-500 focus:ring-0"
+                          className="rounded bg-[#1f242e] border-[#2d3545] text-orange-500 focus:ring-0"
                         />
                       </label>
                     </div>
                   )}
                 </div>
+                )}
               </div>
 
             </div>

@@ -151,7 +151,9 @@ pub fn concatenate_alignments_by_gene(
             let gap_pad = "-".repeat(locus_len);
             for taxon in &all_taxa {
                 let seq_chunk = taxon_seq_map.get(taxon.as_str()).copied().unwrap_or(&gap_pad);
-                concatenated_seqs.get_mut(taxon).unwrap().push_str(seq_chunk);
+                if let Some(sequence) = concatenated_seqs.get_mut(taxon) {
+                    sequence.push_str(seq_chunk);
+                }
             }
             current_offset += locus_len;
             total_exons_processed += 1;

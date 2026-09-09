@@ -1,14 +1,21 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use walkdir::WalkDir;
 
 use crate::algorithms::assess::assess_alignment;
 use crate::algorithms::informative::calculate_site_statistics;
+use crate::algorithms::orf::should_skip_orf_locus;
 use crate::algorithms::stats::{calculate_gap_stats, calculate_gc_percent, compute_mean_divergence};
 use crate::models::{Alignment, AlignmentSummary, DatasetOverview, TaxonOccupancy};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::parsers::parse_alignment;
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
@@ -19,31 +26,50 @@ pub fn recipe_with_dataset_sample_filter(
     recipe: &TrimmingRecipe,
     alignments: &[Alignment],
 ) -> TrimmingRecipe {
+    // Borrow the taxon lists rather than copying the alignments.
+    let presence: Vec<&[String]> = alignments
+        .iter()
+        .map(|alignment| alignment.taxa.as_slice())
+        .collect();
+    recipe_with_taxon_presence(recipe, &presence)
+}
+
+/// Same filter, driven by taxon lists alone. Callers that only hold sample
+/// names avoid cloning every sequence in the dataset.
+pub fn recipe_with_taxon_presence<T: AsRef<[String]>>(
+    recipe: &TrimmingRecipe,
+    loci_taxa: &[T],
+) -> TrimmingRecipe {
     let mut runtime_recipe = recipe.clone();
-    runtime_recipe.excluded_taxa.clear();
+    // Start from the samples the user discarded by hand, then add whatever the
+    // occupancy threshold excludes. Clearing the list outright would throw the
+    // manual choices away on every recalculation.
+    runtime_recipe.excluded_taxa = recipe.discarded_taxa.clone();
 
     let threshold = recipe.min_sample_locus_occupancy_percent;
-    if threshold <= 0.0 || alignments.is_empty() {
+    if threshold <= 0.0 || loci_taxa.is_empty() {
+        runtime_recipe.excluded_taxa.sort();
+        runtime_recipe.excluded_taxa.dedup();
         return runtime_recipe;
     }
 
-    let mut presence_counts: HashMap<String, usize> = HashMap::new();
-    for alignment in alignments {
-        let taxa_in_locus: HashSet<&str> = alignment.taxa.iter().map(String::as_str).collect();
+    let mut presence_counts: HashMap<&str, usize> = HashMap::new();
+    for taxa in loci_taxa {
+        let taxa_in_locus: HashSet<&str> = taxa.as_ref().iter().map(String::as_str).collect();
         for taxon in taxa_in_locus {
-            *presence_counts.entry(taxon.to_string()).or_insert(0) += 1;
+            *presence_counts.entry(taxon).or_insert(0) += 1;
         }
     }
 
-    let total_loci = alignments.len() as f64;
-    runtime_recipe.excluded_taxa = presence_counts
-        .into_iter()
-        .filter_map(|(taxon, count)| {
+    let total_loci = loci_taxa.len() as f64;
+    runtime_recipe
+        .excluded_taxa
+        .extend(presence_counts.into_iter().filter_map(|(taxon, count)| {
             let occupancy_percent = (count as f64 / total_loci) * 100.0;
-            (occupancy_percent < threshold).then_some(taxon)
-        })
-        .collect();
+            (occupancy_percent < threshold).then_some(taxon.to_string())
+        }));
     runtime_recipe.excluded_taxa.sort();
+    runtime_recipe.excluded_taxa.dedup();
     runtime_recipe
 }
 
@@ -58,11 +84,40 @@ pub fn recipe_without_orf_analysis(recipe: &TrimmingRecipe) -> TrimmingRecipe {
     catalog_recipe
 }
 
-/// Scans a directory of alignments in parallel and returns summaries for all files in a single pass.
+/// How many directory levels below the chosen folder are searched.
+pub const MAX_SCAN_DEPTH: usize = 4;
+
+/// Extensions the scanner accepts. The browser file picker uses the same list
+/// in `SUPPORTED_ALIGNMENT_EXTENSIONS` (src/tauriClient.ts); keep them in step.
+pub const SUPPORTED_ALIGNMENT_EXTENSIONS: [&str; 11] = [
+    "fa", "fasta", "fna", "ffn", "faa", "phy", "phylip", "nex", "nexus", "aln", "txt",
+];
+
+/// One file that could not be read, reported to the user instead of dropped.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ParseFailure {
+    pub file_name: String,
+    pub file_path: String,
+    pub error: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type ScanOutcome = (
+    Vec<AlignmentSummary>,
+    DatasetOverview,
+    Vec<TaxonOccupancy>,
+    Vec<Alignment>,
+    Vec<ParseFailure>,
+);
+
+/// Scans a directory of alignments in parallel and returns summaries for all
+/// files in a single pass, plus the files that could not be parsed.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn scan_alignment_directory<P: AsRef<Path>, F>(
     dir: P,
     progress_callback: Option<F>,
-) -> Result<(Vec<AlignmentSummary>, DatasetOverview, Vec<TaxonOccupancy>, Vec<Alignment>), String>
+) -> Result<ScanOutcome, String>
 where
     F: Fn(usize, usize, &str) + Send + Sync + 'static,
 {
@@ -71,9 +126,11 @@ where
         return Err(format!("Directory does not exist: {:?}", dir_path));
     }
 
-    // Collect all candidate alignment files (skipping hidden and build dirs)
+    // Collect all candidate alignment files (skipping hidden and build dirs).
+    // The depth limit keeps an accidental pick of a large tree, such as a home
+    // directory, from walking the whole disk.
     let file_paths: Vec<PathBuf> = WalkDir::new(dir_path)
-        .max_depth(4)
+        .max_depth(MAX_SCAN_DEPTH)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
@@ -85,10 +142,7 @@ where
         .filter(|p| {
             if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
                 let ext_lower = ext.to_ascii_lowercase();
-                matches!(
-                    ext_lower.as_str(),
-                    "fa" | "fasta" | "fna" | "faa" | "phy" | "phylip" | "nex" | "nexus" | "aln" | "txt"
-                )
+                SUPPORTED_ALIGNMENT_EXTENSIONS.contains(&ext_lower.as_str())
             } else {
                 false
             }
@@ -97,10 +151,14 @@ where
 
     let total_files = file_paths.len();
     if total_files == 0 {
-        return Err(
-            "No supported alignment files (.fa, .fasta, .phy, .nex) found in directory"
-                .to_string(),
-        );
+        return Err(format!(
+            "No supported alignment files found in directory. AlignmentForge reads: {}",
+            SUPPORTED_ALIGNMENT_EXTENSIONS
+                .iter()
+                .map(|ext| format!(".{ext}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // Notify initial count
@@ -113,13 +171,24 @@ where
     let progress_ref = progress_callback.map(Arc::new);
 
     // Single-pass ultra-fast parallel extraction: returns (Summary, Vec<(Taxon, non_gap_bp, gap_pct)>, Alignment)
-    let processed: Vec<(AlignmentSummary, Vec<(String, usize, f64)>, Alignment)> = file_paths
+    type IndexedAlignment = (AlignmentSummary, Vec<(String, usize, f64)>, Alignment);
+    let processed: Vec<Result<IndexedAlignment, ParseFailure>> = file_paths
         .par_iter()
-        .filter_map(|path| {
-            let parsed = parse_alignment(path).ok().map(|align| {
-                let (summary, taxa_info) = fast_index_alignment(&align, &default_recipe, 0);
-                (summary, taxa_info, align)
-            });
+        .map(|path| {
+            let parsed = match parse_alignment(path) {
+                Ok(align) => {
+                    let (summary, taxa_info) = fast_index_alignment(&align, &default_recipe, 0);
+                    Ok((summary, taxa_info, align))
+                }
+                Err(error) => Err(ParseFailure {
+                    file_name: path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    file_path: path.to_string_lossy().to_string(),
+                    error,
+                }),
+            };
 
             // Update atomic progress counter (throttled to every 100 files to minimize IPC overhead)
             let cur = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -137,10 +206,29 @@ where
         })
         .collect();
 
-    if processed.is_empty() {
-        return Err("Failed to parse any alignment files in the selected folder".to_string());
+    let mut parse_failures = Vec::new();
+    let mut succeeded = Vec::with_capacity(processed.len());
+    for outcome in processed {
+        match outcome {
+            Ok(indexed) => succeeded.push(indexed),
+            Err(failure) => parse_failures.push(failure),
+        }
+    }
+    parse_failures.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+
+    if succeeded.is_empty() {
+        let detail = parse_failures
+            .iter()
+            .take(3)
+            .map(|failure| format!("{}: {}", failure.file_name, failure.error))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "Failed to parse any alignment files in the selected folder. {detail}"
+        ));
     }
 
+    let processed = succeeded;
     let total_loci = processed.len();
     let mut summaries = Vec::with_capacity(total_loci);
     let mut alignments = Vec::with_capacity(total_loci);
@@ -204,7 +292,7 @@ where
 
     occupancy.sort_by(|a, b| b.present_loci_count.cmp(&a.present_loci_count));
 
-    Ok((summaries, overview, occupancy, alignments))
+    Ok((summaries, overview, occupancy, alignments, parse_failures))
 }
 
 /// Ultra-fast single-pass alignment metadata extractor for directory indexing.
@@ -228,6 +316,11 @@ pub fn fast_index_alignment(
         let seq_len = seq.len();
         let mut sample_gaps = 0usize;
 
+        // `total_bp` counts observed bases. It always excludes `-`, `?`, and `N`
+        // so it matches `count_observed_bases`, which the post-trimming summary
+        // uses. `count_n_as_gap` only decides whether an N is reported as a gap.
+        // GC percent is measured over unambiguous A/C/G/T so a run of ambiguity
+        // codes cannot shift it.
         for &b in seq.as_bytes() {
             match b {
                 b'-' | b'?' => {
@@ -236,9 +329,9 @@ pub fn fast_index_alignment(
                 }
                 b'N' | b'n' => {
                     if recipe.count_n_as_gap {
-                        sample_gaps += 1;
                         gap_count += 1;
                     }
+                    sample_gaps += 1;
                 }
                 b'G' | b'g' | b'C' | b'c' => {
                     gc_count += 1;
@@ -250,7 +343,8 @@ pub fn fast_index_alignment(
                     total_bp += 1;
                 }
                 _ => {
-                    total_valid_bases += 1;
+                    // Ambiguity codes are observed data but have no defined GC
+                    // contribution, so they count toward bp and not toward GC.
                     total_bp += 1;
                 }
             }
@@ -360,27 +454,134 @@ pub fn fast_index_alignment(
     (summary, taxa_stats)
 }
 
+/// Counts observed bases in a sequence. `-`, `?`, and `N` are missing data and
+/// never count; every other state does. This is the single definition of a
+/// "base pair" used by both the directory index and the post-trimming summary.
+pub fn count_observed_bases(sequence: &str) -> usize {
+    sequence
+        .bytes()
+        .filter(|state| !matches!(state, b'-' | b'?' | b'N' | b'n'))
+        .count()
+}
+
+fn taxon_basepair_map(taxa: &[String], sequences: &[String]) -> HashMap<String, usize> {
+    taxa.iter()
+        .zip(sequences.iter())
+        .map(|(taxon, sequence)| (taxon.clone(), count_observed_bases(sequence)))
+        .collect()
+}
+
+/// A locus summary before the pass and fail thresholds are applied.
+///
+/// Everything expensive lives here: the alignment has been trimmed and every
+/// metric measured. Only the gating decision is outstanding, so changing a
+/// threshold can reuse this instead of running the pipeline again.
+#[derive(Debug, Clone)]
+pub struct UnassessedSummary {
+    /// `fail_reasons` holds pipeline failures only, not threshold failures.
+    pub summary: AlignmentSummary,
+    pub pipeline_pass: bool,
+}
+
+/// Applies the pass and fail thresholds to an already measured locus.
+pub fn apply_assessment(
+    unassessed: &UnassessedSummary,
+    recipe: &TrimmingRecipe,
+    total_dataset_taxa: usize,
+) -> AlignmentSummary {
+    let mut summary = unassessed.summary.clone();
+    let mut fail_reasons = summary.fail_reasons.clone();
+
+    if summary.num_taxa == 0 {
+        let reason = "0 surviving taxa (all samples pruned)".to_string();
+        if !fail_reasons.contains(&reason) {
+            fail_reasons.push(reason);
+        }
+    }
+
+    if recipe.assess_alignment {
+        let (_, assess_reasons) = assess_alignment(
+            summary.num_taxa,
+            if total_dataset_taxa > 0 {
+                total_dataset_taxa
+            } else {
+                summary.raw_num_taxa
+            },
+            summary.length,
+            summary.gap_percent,
+            recipe.min_taxa,
+            recipe.min_taxa_occupancy_percent,
+            recipe.min_length,
+            recipe.max_gap_percent,
+            summary.pis_count,
+            summary.pis_percent,
+            recipe.min_pis_count,
+            recipe.min_pis_percent,
+            summary.variable_count,
+            summary.variable_percent,
+            recipe.min_variable_count,
+            recipe.min_variable_percent,
+        );
+        for reason in assess_reasons {
+            if !fail_reasons.contains(&reason) {
+                fail_reasons.push(reason);
+            }
+        }
+    }
+
+    summary.pass =
+        unassessed.pipeline_pass && fail_reasons.is_empty() && summary.num_taxa > 0;
+    summary.fail_reasons = fail_reasons;
+    summary
+}
+
 pub fn summarize_alignment(
     alignment: &Alignment,
     recipe: &TrimmingRecipe,
     total_dataset_taxa: usize,
 ) -> AlignmentSummary {
+    let unassessed = summarize_alignment_unassessed(alignment, recipe, total_dataset_taxa);
+    apply_assessment(&unassessed, recipe, total_dataset_taxa)
+}
+
+/// Runs the pipeline and measures the locus, without applying the thresholds.
+pub fn summarize_alignment_unassessed(
+    alignment: &Alignment,
+    recipe: &TrimmingRecipe,
+    total_dataset_taxa: usize,
+) -> UnassessedSummary {
     let raw_length = alignment.length;
     let raw_num_taxa = alignment.num_taxa;
 
     // Catalog QC and ORF analysis are parallel outcomes. Catalog metrics come
     // from the ordinary alignment branch; ORF metadata comes from its own
     // branch and cannot change Catalog pass/fail or its filter measurements.
+    // Gating is applied later, so the pipeline runs with it switched off and
+    // records only the failures that processing itself produced.
+    let mut processing_recipe = recipe.clone();
+    processing_recipe.assess_alignment = false;
+    let recipe = &processing_recipe;
+
     let catalog_recipe = recipe_without_orf_analysis(recipe);
     let (trimmed, diff) = apply_recipe(alignment, &catalog_recipe, total_dataset_taxa);
-    let (orf_alignment, orf_diff) = if recipe.enable_orf {
+
+    // The ORF branch only differs when ORF analysis actually runs on this locus.
+    // A locus that ORF skips, such as an excluded UCE, would repeat the whole
+    // pipeline for an identical result.
+    let orf_branch_differs = recipe.enable_orf
+        && !(recipe.exclude_uce && should_skip_orf_locus(&alignment.id, recipe.orf_search_mode));
+    let (orf_alignment, orf_diff) = if orf_branch_differs {
         apply_recipe(alignment, recipe, total_dataset_taxa)
     } else {
         (trimmed.clone(), diff.clone())
     };
 
-    let (gap_count, total_chars, _) = calculate_gap_stats(&trimmed.sequences);
-    let total_bp = total_chars.saturating_sub(gap_count);
+    let (gap_count, _, _) = calculate_gap_stats(&trimmed.sequences);
+    let total_bp: usize = trimmed
+        .sequences
+        .iter()
+        .map(|sequence| count_observed_bases(sequence))
+        .sum();
     let gap_percent = diff.new_gap_percent;
     let variable_count = diff.new_variable;
     let variable_percent = if trimmed.length > 0 {
@@ -397,44 +598,11 @@ pub fn summarize_alignment(
     let mean_divergence = compute_mean_divergence(&trimmed.sequences);
     let gc_percent = calculate_gc_percent(&trimmed.sequences);
 
-    let mut fail_reasons = diff.fail_reasons.clone();
+    let fail_reasons = diff.fail_reasons.clone();
+    let pipeline_pass = diff.pass;
+    let pass = pipeline_pass;
 
-    if trimmed.num_taxa == 0 {
-        let r0 = "0 surviving taxa (all samples pruned)".to_string();
-        if !fail_reasons.contains(&r0) {
-            fail_reasons.push(r0);
-        }
-    }
-
-    if recipe.assess_alignment {
-        let (_, assess_reasons) = assess_alignment(
-            trimmed.num_taxa,
-            if total_dataset_taxa > 0 { total_dataset_taxa } else { raw_num_taxa },
-            trimmed.length,
-            gap_percent,
-            recipe.min_taxa,
-            recipe.min_taxa_occupancy_percent,
-            recipe.min_length,
-            recipe.max_gap_percent,
-            pis_count,
-            pis_percent,
-            recipe.min_pis_count,
-            recipe.min_pis_percent,
-            variable_count,
-            variable_percent,
-            recipe.min_variable_count,
-            recipe.min_variable_percent,
-        );
-        for r in assess_reasons {
-            if !fail_reasons.contains(&r) {
-                fail_reasons.push(r);
-            }
-        }
-    }
-
-    let pass = diff.pass && fail_reasons.is_empty() && trimmed.num_taxa > 0;
-
-    AlignmentSummary {
+    let summary = AlignmentSummary {
         id: alignment.id.clone(),
         file_name: alignment.file_name.clone(),
         file_path: alignment.file_path.clone(),
@@ -474,31 +642,17 @@ pub fn summarize_alignment(
         raw_length,
         raw_gap_percent: diff.old_gap_percent,
         retained_taxa: trimmed.taxa.clone(),
-        retained_taxon_basepairs: trimmed
-            .taxa
-            .iter()
-            .zip(trimmed.sequences.iter())
-            .map(|(taxon, sequence)| {
-                let basepairs = sequence
-                    .bytes()
-                    .filter(|state| !matches!(state, b'-' | b'?' | b'N' | b'n'))
-                    .count();
-                (taxon.clone(), basepairs)
-            })
-            .collect(),
+        retained_taxon_basepairs: taxon_basepair_map(&trimmed.taxa, &trimmed.sequences),
         orf_retained_taxa: orf_alignment.taxa.clone(),
-        orf_retained_taxon_basepairs: orf_alignment
-            .taxa
-            .iter()
-            .zip(orf_alignment.sequences.iter())
-            .map(|(taxon, sequence)| {
-                let basepairs = sequence
-                    .bytes()
-                    .filter(|state| !matches!(state, b'-' | b'?' | b'N' | b'n'))
-                    .count();
-                (taxon.clone(), basepairs)
-            })
-            .collect(),
+        orf_retained_taxon_basepairs: taxon_basepair_map(
+            &orf_alignment.taxa,
+            &orf_alignment.sequences,
+        ),
+    };
+
+    UnassessedSummary {
+        summary,
+        pipeline_pass,
     }
 }
 
@@ -541,6 +695,7 @@ pub fn compute_dataset_overview(summaries: &[AlignmentSummary]) -> DatasetOvervi
 }
 
 /// Evaluates a TrimmingRecipe across pre-parsed in-memory Alignment objects in parallel
+#[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_alignments(
     alignments: &[Alignment],
     recipe: &TrimmingRecipe,
@@ -555,6 +710,7 @@ pub fn evaluate_recipe_on_alignments(
 }
 
 /// Evaluates a recipe across cached alignments and reports completed loci as workers finish.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_alignments_with_progress<F>(
     alignments: &[Alignment],
     recipe: &TrimmingRecipe,
@@ -575,6 +731,7 @@ where
 }
 
 /// Evaluates cached alignments while allowing a newer UI request to stop stale work.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_alignments_with_progress_and_cancel<F, C>(
     alignments: &[Alignment],
     recipe: &TrimmingRecipe,
@@ -615,6 +772,7 @@ where
 }
 
 /// Evaluates a TrimmingRecipe across all summary entries by re-parsing from disk in parallel (fallback)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_summaries(
     paths: &[String],
     recipe: &TrimmingRecipe,
@@ -629,6 +787,7 @@ pub fn evaluate_recipe_on_summaries(
 }
 
 /// Disk-backed fallback for catalog recalculation with completed-locus progress.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_summaries_with_progress<F>(
     paths: &[String],
     recipe: &TrimmingRecipe,
@@ -638,6 +797,8 @@ pub fn evaluate_recipe_on_summaries_with_progress<F>(
 where
     F: Fn(usize, usize, &str) + Send + Sync,
 {
+    // Files that cannot be re-read are skipped here; the scan already reported
+    // them, and this path only refreshes metrics for a known dataset.
     let alignments: Vec<Alignment> = paths
         .par_iter()
         .filter_map(|path| parse_alignment(path).ok())
@@ -650,7 +811,7 @@ where
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::algorithms::orf::StopCodonAction;
@@ -660,8 +821,9 @@ mod tests {
     fn test_scan_directory_test_data() {
         let test_dir = std::path::Path::new("../test_data");
         if test_dir.exists() {
-            let (summaries, overview, occupancy, _alignments) =
+            let (summaries, overview, occupancy, _alignments, failures) =
                 scan_alignment_directory(test_dir, None::<fn(usize, usize, &str)>).unwrap();
+            assert!(failures.is_empty(), "unexpected parse failures: {failures:?}");
             assert!(!summaries.is_empty());
             assert!(overview.total_alignments >= 4);
             assert!(!occupancy.is_empty());
@@ -723,6 +885,31 @@ mod tests {
         assert_eq!(summaries[0].orf_retained_samples, 3);
         assert_eq!(summaries[0].orf_retained_taxa.len(), 3);
         assert_eq!(overview.passed_alignments, 1);
+    }
+
+    #[test]
+    fn discarded_samples_survive_the_occupancy_filter() {
+        let alignments = vec![Alignment::new(
+            "locus_1".to_string(),
+            "locus_1.fa".to_string(),
+            "/dummy/locus_1.fa".to_string(),
+            AlignmentFormat::Fasta,
+            vec!["Keep".to_string(), "DropByHand".to_string()],
+            vec!["ACGT".to_string(), "ACGT".to_string()],
+        )];
+
+        let mut recipe = TrimmingRecipe {
+            discarded_taxa: vec!["DropByHand".to_string()],
+            ..Default::default()
+        };
+        // With no occupancy threshold the manual list must still be applied.
+        let runtime = recipe_with_dataset_sample_filter(&recipe, &alignments);
+        assert_eq!(runtime.excluded_taxa, vec!["DropByHand".to_string()]);
+
+        // And it must survive a run that also derives exclusions from occupancy.
+        recipe.min_sample_locus_occupancy_percent = 60.0;
+        let runtime = recipe_with_dataset_sample_filter(&recipe, &alignments);
+        assert!(runtime.excluded_taxa.contains(&"DropByHand".to_string()));
     }
 
     #[test]

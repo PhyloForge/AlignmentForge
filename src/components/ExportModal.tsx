@@ -8,6 +8,7 @@ import {
   FileSpreadsheet,
   FileCode,
   FileText,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   AlignmentFormat,
@@ -19,7 +20,15 @@ import {
   GroupedConcatenateResult,
   TrimmingRecipe,
 } from '../types';
-import { openSaveDirectoryDialog, openFileDialog, runBatchExport, runConcatenate, runGroupedConcatenate } from '../tauriClient';
+import {
+  DESKTOP_ONLY_EXPORT_MESSAGE,
+  isTauri,
+  openSaveDirectoryDialog,
+  openFileDialog,
+  runBatchExport,
+  runConcatenate,
+  runGroupedConcatenate,
+} from '../tauriClient';
 import { Sparkles, FileSearch } from 'lucide-react';
 
 interface ExportModalProps {
@@ -206,6 +215,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
         {/* Content Body */}
         <div className="p-5 space-y-4 text-xs overflow-y-auto">
+          {!isTauri && (
+            <div className="p-3 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 flex gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-semibold">Export needs the desktop app</div>
+                <div className="text-amber-200/80">
+                  The browser version keeps your data on your device and cannot write files to
+                  disk. Download the desktop app to export.
+                </div>
+              </div>
+            </div>
+          )}
           {batchResult || concatResult || groupResult ? (
             /* Success Feedback */
             <div className="py-4 text-center space-y-3">
@@ -539,7 +560,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </button>
                 <button
                   onClick={handleExecuteExport}
-                  disabled={isRunning}
+                  disabled={isRunning || !isTauri}
+                  title={isTauri ? undefined : DESKTOP_ONLY_EXPORT_MESSAGE}
                   className="px-4 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
                   {isRunning ? (

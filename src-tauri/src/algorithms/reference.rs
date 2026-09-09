@@ -110,7 +110,22 @@ fn dominant_anchor_diagonal(reference: &[u8], target: &[u8]) -> Option<isize> {
                 }
             }
         }
-        if let Some((diagonal, support)) = diagonals.into_iter().max_by_key(|(_, support)| *support) {
+        // Pick the best supported diagonal, breaking a tie on the smallest shift
+        // so the anchor is reproducible. Iterating the map directly would depend
+        // on HashMap ordering, which Rust randomises per process.
+        let best = diagonals.into_iter().fold(
+            None::<(isize, usize)>,
+            |best, (diagonal, support)| match best {
+                Some((best_diagonal, best_support))
+                    if best_support > support
+                        || (best_support == support && best_diagonal.abs() <= diagonal.abs()) =>
+                {
+                    Some((best_diagonal, best_support))
+                }
+                _ => Some((diagonal, support)),
+            },
+        );
+        if let Some((diagonal, support)) = best {
             if support >= 2 || kmer_length <= 7 {
                 return Some(diagonal);
             }
@@ -119,7 +134,14 @@ fn dominant_anchor_diagonal(reference: &[u8], target: &[u8]) -> Option<isize> {
     None
 }
 
-fn extend_state(mut state: LocalState, score_delta: i32, reference: bool, target: bool, matched: bool, start_target: usize) -> LocalState {
+fn extend_state(
+    mut state: LocalState,
+    score_delta: i32,
+    reference: bool,
+    target: bool,
+    matched: bool,
+    start_target: usize,
+) -> LocalState {
     if state.score <= 0 {
         state = LocalState {
             score: 0,

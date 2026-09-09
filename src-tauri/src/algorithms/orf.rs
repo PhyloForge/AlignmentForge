@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::models::MaskedSegment;
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +79,7 @@ impl Default for OrfConfig {
             min_segment_aa: 35,
             min_coding_score: 40.0,
             exclude_uce: true,
-            fail_if_no_orf: true, 
+            fail_if_no_orf: false,
             max_stop_codons_sample: 2,
             max_stop_codons_locus: 5,
             macse_trim_terminal: true,
@@ -199,9 +200,19 @@ pub fn translate_codon(codon: &[u8], code: GeneticCode) -> char {
     if codon.len() < 3 {
         return '-';
     }
-    let c1 = (codon[0] as char).to_ascii_uppercase();
-    let c2 = (codon[1] as char).to_ascii_uppercase();
-    let c3 = (codon[2] as char).to_ascii_uppercase();
+    // RNA alignments spell thymine as uracil. Normalising here means every
+    // genetic code below only needs the DNA spelling of each codon.
+    let to_dna = |base: u8| -> char {
+        let upper = (base as char).to_ascii_uppercase();
+        if upper == 'U' {
+            'T'
+        } else {
+            upper
+        }
+    };
+    let c1 = to_dna(codon[0]);
+    let c2 = to_dna(codon[1]);
+    let c3 = to_dna(codon[2]);
 
     if c1 == '-' || c2 == '-' || c3 == '-' {
         return '-';
@@ -419,7 +430,11 @@ fn synonymous_change_fraction(sequences: &[String], code: GeneticCode) -> f64 {
 
     for codon_index in 0..codon_count {
         let start = codon_index * 3;
-        let mut counts: HashMap<[u8; 3], usize> = HashMap::new();
+        // Insertion ordered so the consensus tie-break is reproducible. A plain
+        // HashMap randomises iteration per process, which made the coding score
+        // - and therefore an accept or reject at min_coding_score - vary between
+        // runs on identical input.
+        let mut counts: IndexMap<[u8; 3], usize> = IndexMap::new();
         for sequence in sequences {
             let bytes = sequence.as_bytes();
             let codon = [
@@ -431,7 +446,16 @@ fn synonymous_change_fraction(sequences: &[String], code: GeneticCode) -> f64 {
                 *counts.entry(codon).or_insert(0) += 1;
             }
         }
-        let Some((&consensus, _)) = counts.iter().max_by_key(|(_, count)| *count) else {
+        // The first codon reaching the highest count wins, matching the browser
+        // implementation's stable sort over insertion order.
+        let mut consensus_entry: Option<([u8; 3], usize)> = None;
+        for (codon, count) in &counts {
+            match consensus_entry {
+                Some((_, best)) if *count <= best => {}
+                _ => consensus_entry = Some((*codon, *count)),
+            }
+        }
+        let Some((consensus, _)) = consensus_entry else {
             continue;
         };
         let consensus_amino_acid = translate_codon(&consensus, code);
@@ -1044,7 +1068,12 @@ pub fn optimize_open_reading_frames_guided(
                 dropped_taxa.push(taxon.clone());
             } else {
                 kept_taxa.push(taxon.clone());
-                kept_seqs.push(String::from_utf8(seq_bytes).unwrap());
+                // Every byte written above is ASCII, so this cannot fail; fall
+                // back to a lossy read rather than aborting if that ever changes.
+                kept_seqs.push(
+                    String::from_utf8(seq_bytes.clone())
+                        .unwrap_or_else(|_| String::from_utf8_lossy(&seq_bytes).into_owned()),
+                );
             }
         }
 
@@ -1324,6 +1353,48 @@ mod tests {
         let result =
             find_best_shared_orf_segment(&seqs, GeneticCode::Standard, 50.0, 3, 0.0);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn coding_evidence_is_reproducible_across_runs() {
+        // Tie-breaks in the codon consensus once depended on HashMap iteration
+        // order, so the same locus scored differently between runs. Repeat the
+        // computation over freshly built maps and require one answer.
+        let sequences: Vec<String> = vec![
+            "ATGAAACCCGGGTTTAAACCCGGGTTTTAA".to_string(),
+            "ATGAAGCCCGGATTTAAACCTGGGTTCTAA".to_string(),
+            "ATGAAACCTGGGTTCAAGCCCGGATTTTAA".to_string(),
+            "ATGAAGCCTGGATTCAAGCCTGGATTCTAA".to_string(),
+        ];
+        let first = candidate_coding_evidence(&sequences, 0, 30, GeneticCode::Standard);
+        for _ in 0..64 {
+            let again = candidate_coding_evidence(&sequences, 0, 30, GeneticCode::Standard);
+            assert_eq!(
+                first.0.to_bits(),
+                again.0.to_bits(),
+                "coding score must not vary between runs"
+            );
+        }
+    }
+
+    #[test]
+    fn rna_codons_translate_under_every_genetic_code() {
+        // Uracil spelling must behave exactly like thymine spelling.
+        for code in [
+            GeneticCode::Standard,
+            GeneticCode::VertebrateMitochondrial,
+            GeneticCode::InvertebrateMitochondrial,
+        ] {
+            assert_eq!(translate_codon(b"AUG", code), translate_codon(b"ATG", code));
+            assert_eq!(translate_codon(b"UUU", code), translate_codon(b"TTT", code));
+            assert_eq!(translate_codon(b"UAA", code), '*');
+            assert_eq!(translate_codon(b"AUG", code), 'M');
+        }
+        assert_eq!(translate_codon(b"UGA", GeneticCode::Standard), '*');
+        assert_eq!(
+            translate_codon(b"UGA", GeneticCode::VertebrateMitochondrial),
+            'W'
+        );
     }
 
     #[test]

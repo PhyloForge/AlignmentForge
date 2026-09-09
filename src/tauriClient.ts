@@ -1,5 +1,4 @@
 import {
-  Alignment,
   AlignmentSummary,
   AlignmentViewResponse,
   BatchExportConfig,
@@ -9,22 +8,34 @@ import {
   ConcatenateResult,
   GroupedConcatenateConfig,
   GroupedConcatenateResult,
-  DatasetOverview,
+  ParseFailure,
   ScanResponse,
-  TaxonOccupancy,
   TrimmingRecipe,
 } from './types';
-import {
-  buildDatasetOverviewFromSummaries,
-  buildScanResponseFromAlignments,
-  computeAlignmentSummary,
-  executeClientTrimming,
-  parseAlignmentText,
-  recipeWithDatasetSampleFilter,
-} from './parsers/clientParser';
+import { buildDatasetOverviewFromSummaries } from './summaries';
+import { DEFAULT_RECIPE } from './defaultRecipe';
+import { enginePool } from './engine/enginePool';
+import type { AlignmentInput } from './engine/engineWorker';
 
-// In-memory cache for client-side / browser loaded alignments
-const clientAlignmentsCache = new Map<string, Alignment>();
+/**
+ * Extensions the desktop scanner accepts. The browser file picker must use the
+ * same list, otherwise the two builds load different files from one folder.
+ * Keep in step with `scan_alignment_directory` in `pipeline/catalog.rs`.
+ */
+export const SUPPORTED_ALIGNMENT_EXTENSIONS = [
+  'fa',
+  'fasta',
+  'fna',
+  'ffn',
+  'faa',
+  'phy',
+  'phylip',
+  'nex',
+  'nexus',
+  'aln',
+  'txt',
+] as const;
+
 let catalogJobCounter = 0;
 
 export interface CatalogRecalculationProgress {
@@ -38,6 +49,14 @@ export interface CatalogRecalculationProgress {
 export const isTauri =
   typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+
+/**
+ * Writing files needs the desktop shell. The browser build must refuse instead
+ * of reporting an export it cannot perform.
+ */
+export const DESKTOP_ONLY_EXPORT_MESSAGE =
+  'Exporting files needs the AlignmentForge desktop app. The browser version cannot write to your disk. ' +
+  'Download the desktop app to export alignments, supermatrices, and gene groups.';
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri) {
@@ -166,9 +185,16 @@ export async function scanDirectory(dirPath: string): Promise<ScanResponse> {
   if (isTauri) {
     return invokeTauri<ScanResponse>('scan_directory', { dirPath });
   } else {
-    if (clientAlignmentsCache.size > 0) {
-      const aligns = Array.from(clientAlignmentsCache.values());
-      return await buildScanResponseFromAlignments(aligns, defaultRecipe);
+    if (enginePool.hasDataset()) {
+      const [summaries, occupancy] = await Promise.all([
+        enginePool.summarize(DEFAULT_RECIPE),
+        enginePool.occupancy(),
+      ]);
+      return {
+        summaries,
+        overview: buildDatasetOverviewFromSummaries(summaries, occupancy.length),
+        occupancy,
+      };
     }
     return {
       summaries: [],
@@ -184,6 +210,7 @@ export async function scanDirectory(dirPath: string): Promise<ScanResponse> {
         total_matrix_basepairs: 0,
       },
       occupancy: [],
+      parse_failures: [],
     };
   }
 }
@@ -193,56 +220,74 @@ export async function loadDirectoryFromFiles(
   recipe: TrimmingRecipe,
   onProgress?: (current: number, total: number, fileName: string) => void
 ): Promise<{ dirName: string; scanResponse: ScanResponse }> {
-  clientAlignmentsCache.clear();
   const fileArray = Array.from(files).filter((file) => {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    return ['fa', 'fasta', 'fna', 'faa', 'phy', 'phylip', 'nex', 'nexus'].includes(ext);
+    return (SUPPORTED_ALIGNMENT_EXTENSIONS as readonly string[]).includes(ext);
   });
 
   const total = fileArray.length;
   if (total === 0) {
-    throw new Error('No supported alignment files (.fa, .fasta, .phy, .nex) found in folder.');
+    throw new Error(
+      `No supported alignment files found in folder. AlignmentForge reads: ${SUPPORTED_ALIGNMENT_EXTENSIONS.map((ext) => `.${ext}`).join(', ')}`
+    );
   }
 
   let dirName = 'Custom Alignments';
-  const parsedAlignments: Alignment[] = [];
-  const BATCH_SIZE = 30; // process in small non-blocking chunks
-
-  for (let i = 0; i < total; i += BATCH_SIZE) {
-    const chunk = fileArray.slice(i, i + BATCH_SIZE);
-
-    for (const file of chunk) {
-      if (file.webkitRelativePath) {
-        const parts = file.webkitRelativePath.split('/');
-        if (parts.length > 1) {
-          dirName = parts[0];
-        }
-      }
-
-      try {
-        const text = await file.text();
-        const align = parseAlignmentText(text, file.name, file.webkitRelativePath || file.name);
-        parsedAlignments.push(align);
-        clientAlignmentsCache.set(align.file_path, align);
-      } catch (e) {
-        console.warn('Failed to parse alignment:', file.name, e);
-      }
+  // The files themselves go to the workers. Each worker reads its own shard on
+  // its own thread, so reading and parsing run in parallel and the contents are
+  // never held twice in memory.
+  const inputs: AlignmentInput[] = fileArray.map((file) => {
+    if (file.webkitRelativePath) {
+      const parts = file.webkitRelativePath.split('/');
+      if (parts.length > 1) dirName = parts[0];
     }
-
-    if (onProgress) {
-      const current = Math.min(total, i + BATCH_SIZE);
-      const lastFile = chunk[chunk.length - 1]?.name || '';
-      onProgress(current, total, lastFile);
-    }
-
-    // Yield control to browser renderer loop
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-
-  const scanResponse = await buildScanResponseFromAlignments(parsedAlignments, recipe, 0, (pct) => {
-    if (onProgress) onProgress(total * (pct / 100), total, 'Computing summaries...');
+    return {
+      file,
+      id: file.name.replace(/\.[^/.]+$/, ''),
+      file_name: file.name,
+      file_path: file.webkitRelativePath || file.name,
+    };
   });
+
+  const scanResponse = await loadIntoEngine(inputs, recipe, total, onProgress);
   return { dirName, scanResponse };
+}
+
+/**
+ * Hands the alignments to the worker pool, then builds the scan response from
+ * what the engine reports.
+ */
+async function loadIntoEngine(
+  inputs: AlignmentInput[],
+  recipe: TrimmingRecipe,
+  total: number,
+  onProgress?: (current: number, total: number, fileName: string) => void
+): Promise<ScanResponse> {
+  const loaded = await enginePool.load(inputs, (done, count) => {
+    onProgress?.(
+      total * ((done / Math.max(1, count)) * 0.75),
+      total,
+      'Reading and parsing alignments…'
+    );
+  });
+
+  const [summaries, occupancy] = await Promise.all([
+    enginePool.summarize(recipe, (done, count) => {
+      onProgress?.(
+        total * (0.75 + (done / Math.max(1, count)) * 0.25),
+        total,
+        'Computing summaries…'
+      );
+    }),
+    enginePool.occupancy(),
+  ]);
+
+  return {
+    summaries,
+    overview: buildDatasetOverviewFromSummaries(summaries, loaded.totalUniqueTaxa),
+    occupancy,
+    parse_failures: loaded.parseFailures,
+  };
 }
 
 export async function getAlignment(
@@ -253,15 +298,9 @@ export async function getAlignment(
   if (isTauri) {
     return invokeTauri<AlignmentViewResponse>('get_alignment', { filePath, recipe, totalUniqueTaxa });
   } else {
-    const cached = clientAlignmentsCache.get(filePath);
-    if (cached) {
-      const runtimeRecipe = recipeWithDatasetSampleFilter(
-        recipe,
-        Array.from(clientAlignmentsCache.values())
-      );
-      return executeClientTrimming(cached, runtimeRecipe, totalUniqueTaxa);
-    }
-    throw new Error(`Alignment not found: ${filePath}`);
+    // The engine owns the alignments inside the workers, so the view is built
+    // by the shard that holds this locus.
+    return enginePool.view(filePath, recipe);
   }
 }
 
@@ -295,29 +334,17 @@ export async function recalculateCatalog(
       unlisten();
     }
   } else {
-    const aligns = paths
-      .map((p) => clientAlignmentsCache.get(p))
-      .filter((a): a is Alignment => a !== undefined);
-    const summaries: AlignmentSummary[] = [];
-    const batchSize = 10;
-    const runtimeRecipe = recipeWithDatasetSampleFilter(recipe, aligns);
-
-    onProgress?.({ current: 0, total: aligns.length, percent: 0, file_name: '' });
-    for (let start = 0; start < aligns.length; start += batchSize) {
-      const batch = aligns.slice(start, start + batchSize);
-      for (const alignment of batch) {
-        summaries.push(computeAlignmentSummary(alignment, runtimeRecipe, totalUniqueTaxa));
-      }
-      const current = Math.min(aligns.length, start + batch.length);
+    // Every worker runs its shard at once, so the main thread stays free and
+    // the work spreads across cores instead of blocking on one.
+    onProgress?.({ current: 0, total: paths.length, percent: 0, file_name: '' });
+    const summaries = await enginePool.summarize(recipe, (done, total) => {
       onProgress?.({
-        current,
-        total: aligns.length,
-        percent: aligns.length > 0 ? (current / aligns.length) * 100 : 100,
-        file_name: batch[batch.length - 1]?.file_name || '',
+        current: done,
+        total,
+        percent: total > 0 ? (done / total) * 100 : 100,
+        file_name: '',
       });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
+    });
     return {
       summaries,
       overview: buildDatasetOverviewFromSummaries(summaries, totalUniqueTaxa),
@@ -331,28 +358,8 @@ export async function runBatchExport(
 ): Promise<BatchExportResult> {
   if (isTauri) {
     return invokeTauri<BatchExportResult>('run_batch_export', { config, recipe });
-  } else {
-    return {
-      total_processed: config.input_paths.length,
-      total_exported: config.export_general_alignments ? config.input_paths.length : 0,
-      total_discarded: 0,
-      total_orfs_exported:
-        config.export_orf_alignments && recipe.enable_orf ? config.input_paths.length : 0,
-      alignment_directory_path: config.export_general_alignments
-        ? `${config.output_directory}/${config.general_alignment_directory_name}`
-        : undefined,
-      orf_directory_path:
-        config.export_orf_alignments && recipe.enable_orf
-          ? `${config.output_directory}/${config.orf_alignment_directory_name}`
-          : undefined,
-      summary_csv_path: `${config.output_directory}/alignment-trimming_summary.csv`,
-      recipe_json_path: `${config.output_directory}/recipe.json`,
-      total_introns_exported: config.export_introns ? config.input_paths.length : 0,
-      intron_directory_path: config.export_introns
-        ? `${config.output_directory}/${config.intron_directory_name}`
-        : undefined,
-    };
   }
+  throw new Error(DESKTOP_ONLY_EXPORT_MESSAGE);
 }
 
 export async function runConcatenate(
@@ -361,14 +368,8 @@ export async function runConcatenate(
 ): Promise<ConcatenateResult> {
   if (isTauri) {
     return invokeTauri<ConcatenateResult>('run_concatenate', { config, recipe });
-  } else {
-    return {
-      total_taxa: 20,
-      total_length: 12000,
-      total_loci: config.input_paths.length,
-      supermatrix_path: `${config.output_file_prefix}.${config.output_format === 'phylip' ? 'phy' : 'fa'}`,
-    };
   }
+  throw new Error(DESKTOP_ONLY_EXPORT_MESSAGE);
 }
 
 export async function runGroupedConcatenate(
@@ -377,142 +378,117 @@ export async function runGroupedConcatenate(
 ): Promise<GroupedConcatenateResult> {
   if (isTauri) {
     return invokeTauri<GroupedConcatenateResult>('run_grouped_concatenate', { config, recipe });
-  } else {
-    return {
-      total_genes: 5,
-      total_exons_processed: config.input_paths.length,
-      output_directory: config.output_directory,
-    };
   }
+  throw new Error(DESKTOP_ONLY_EXPORT_MESSAGE);
 }
 
 export async function getPresets(): Promise<TrimmingRecipe[]> {
   if (isTauri) {
     return invokeTauri<TrimmingRecipe[]>('get_presets');
-  } else {
-    return [defaultRecipe];
+  }
+  try {
+    // The engine's own presets, so the browser offers the desktop list.
+    return await enginePool.presets();
+  } catch {
+    return [DEFAULT_RECIPE];
   }
 }
 
-const defaultRecipe: TrimmingRecipe = {
-  name: 'AlignmentForge Default',
-  description: 'Standard balanced phylogenomic filtering pipeline',
-  replace_n_with_gap: true,
-  ambiguity_strategy: 'keep',
-  remove_gap_only_columns: true,
-  trim_similarity: true,
-  similarity_threshold: 0.4,
-  trim_hmm: false,
-  hmm_min_posterior: 0.45,
-  hmm_min_segment_length: 8,
-      hmm_min_island_length: 20,
-  trim_segments: false,
-  segment_window_size: 100,
-  segment_threshold: 0.45,
-  enable_orf: false,
-  auto_shift_frame: true,
-  auto_flip_reverse: true,
-  stop_codon_action: 'removesample',
-  macse_trim_terminal: true,
-  macse_max_internal_sample: 3,
-  macse_max_internal_locus: 10,
-  max_stop_codons_sample: 2,
-  max_stop_codons_locus: 5,
-  genetic_code: 'standard',
-  orf_search_mode: 'continuouscds',
-  orf_min_shared_support_percent: 90.0,
-  orf_min_segment_aa: 35,
-  orf_min_coding_score: 40.0,
-  exclude_uce: true,
-  fail_if_no_orf: false,
-  orf_use_references: false,
-  orf_reference_sequences: {},
-  trim_external: true,
-  min_external_percent: 50.0,
-  codon_preserving: false,
-  trim_columns: false,
-  min_column_gap_percent: 60.0,
-  count_n_as_gap: true,
-  enable_statistical_columns: false,
-  stat_col_method: 'trimalsimilarity',
-  stat_col_similarity_threshold: 0.35,
-  stat_col_window_size: 3,
-  stat_col_heuristic: 'custom',
-  stat_col_min_block_length: 5,
-  stat_col_max_nonconserved: 4,
-  stat_col_gap_treatment: 'half',
-  stat_col_entropy_threshold: 1.5,
-  trim_coverage: true,
-  min_coverage_bp: 60,
-  min_coverage_percent: 50.0,
-  relative_width: 'sample',
-  min_sample_locus_occupancy_percent: 0.0,
-  assess_alignment: true,
-  min_taxa: 4,
-  min_taxa_occupancy_percent: 50.0,
-  min_length: 100,
-  max_gap_percent: 50.0,
-  min_pis_count: 0,
-  min_pis_percent: 0.0,
-  min_variable_count: 0,
-  min_variable_percent: 0.0,
-};
+
+/**
+ * Restricts `?run=` to a folder shipped with the application.
+ *
+ * The value arrives from the page URL, so a crafted link could otherwise point
+ * the app at any host. Only a relative path under `example_data/` is accepted.
+ */
+export function sanitizeExampleDataPath(rawPath: string): string | null {
+  const trimmed = rawPath.trim().replace(/^\/+|\/+$/g, '');
+  if (!trimmed) return null;
+  // Reject absolute URLs, protocol-relative URLs, and parent traversal.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+  if (trimmed.startsWith('//')) return null;
+  if (trimmed.split('/').some((segment) => segment === '..' || segment === '.')) return null;
+  if (trimmed !== 'example_data' && !trimmed.startsWith('example_data/')) return null;
+  return trimmed;
+}
 
 export async function loadDirectoryFromUrl(
   urlPath: string,
   recipe: TrimmingRecipe,
   onProgress?: (current: number, total: number, fileName: string) => void
 ): Promise<{ dirName: string; scanResponse: ScanResponse }> {
-  clientAlignmentsCache.clear();
-  
-  // Fetch manifest
-  const manifestUrl = `${urlPath}/manifest.json`;
+  const safePath = sanitizeExampleDataPath(urlPath);
+  if (!safePath) {
+    throw new Error(
+      `Refused to load '${urlPath}'. The run parameter must name a folder inside example_data.`
+    );
+  }
+
+  const manifestUrl = `${safePath}/manifest.json`;
   const response = await fetch(manifestUrl);
   if (!response.ok) {
     throw new Error(`Failed to fetch manifest from ${manifestUrl}`);
   }
-  
-  const files: string[] = await response.json();
-  if (!files || files.length === 0) {
+
+  const manifest: unknown = await response.json();
+  if (!Array.isArray(manifest) || manifest.length === 0) {
     throw new Error('No files found in manifest.');
   }
+  // Manifest entries name files inside the same folder and nothing above it.
+  const files: string[] = manifest.filter(
+    (entry): entry is string =>
+      typeof entry === 'string' &&
+      entry.length > 0 &&
+      !entry.startsWith('/') &&
+      !/^[a-z][a-z0-9+.-]*:/i.test(entry) &&
+      !entry.split('/').includes('..')
+  );
+  if (files.length === 0) {
+    throw new Error('Manifest contained no usable file names.');
+  }
 
-  let dirName = urlPath.split('/').filter(Boolean).pop() || 'Example Alignments';
-  const parsedAlignments: Alignment[] = [];
-  const BATCH_SIZE = 10;
+  const dirName = safePath.split('/').filter(Boolean).pop() || 'Example Alignments';
   const total = files.length;
+  const inputs: AlignmentInput[] = [];
+  const fetchFailures: ParseFailure[] = [];
+  const BATCH_SIZE = 10;
 
   for (let i = 0; i < total; i += BATCH_SIZE) {
     const chunk = files.slice(i, i + BATCH_SIZE);
-
-    const fetchPromises = chunk.map(async (fileName) => {
-      try {
-        const fileUrl = `${urlPath}/${fileName}`;
-        const res = await fetch(fileUrl);
-        if (!res.ok) throw new Error(`Failed to fetch ${fileName}`);
-        const text = await res.text();
+    await Promise.all(
+      chunk.map(async (fileName) => {
         const baseName = fileName.split('/').pop() || fileName;
-        const align = parseAlignmentText(text, baseName, fileName);
-        parsedAlignments.push(align);
-        clientAlignmentsCache.set(align.file_path, align);
-      } catch (e) {
-        console.warn('Failed to parse alignment from URL:', fileName, e);
-      }
-    });
-    
-    await Promise.all(fetchPromises);
-
-    if (onProgress) {
-      const current = Math.min(total, i + BATCH_SIZE);
-      const lastFile = chunk[chunk.length - 1] || '';
-      onProgress(current, total, lastFile);
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 10));
+        try {
+          const res = await fetch(`${safePath}/${fileName}`);
+          if (!res.ok) throw new Error(`Failed to fetch ${fileName}`);
+          inputs.push({
+            content: await res.text(),
+            id: baseName.replace(/\.[^/.]+$/, ''),
+            file_name: baseName,
+            file_path: fileName,
+          });
+        } catch (e) {
+          fetchFailures.push({
+            file_name: baseName,
+            file_path: fileName,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      })
+    );
+    onProgress?.(Math.min(total, i + BATCH_SIZE) / 2, total, chunk[chunk.length - 1] || '');
   }
 
-  const scanResponse = await buildScanResponseFromAlignments(parsedAlignments, recipe, 0, (pct) => {
-    if (onProgress) onProgress(total * (pct / 100), total, 'Computing summaries...');
-  });
-  return { dirName, scanResponse };
+  if (inputs.length === 0) {
+    throw new Error('None of the manifest files could be downloaded.');
+  }
+
+  const scanResponse = await loadIntoEngine(inputs, recipe, total, onProgress);
+  return {
+    dirName,
+    scanResponse: {
+      ...scanResponse,
+      parse_failures: [...fetchFailures, ...(scanResponse.parse_failures ?? [])],
+    },
+  };
 }

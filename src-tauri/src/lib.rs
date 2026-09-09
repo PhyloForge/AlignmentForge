@@ -1,15 +1,29 @@
 pub mod algorithms;
-pub mod commands;
-pub mod export;
-pub mod filter_config;
 pub mod models;
 pub mod parsers;
 pub mod pipeline;
+
+// Desktop-only surface. The browser build compiles the same engine to
+// WebAssembly, where there is no filesystem, no Tauri shell, and no thread
+// pool, so these modules are left out of that target.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod commands;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod export;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod filter_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod state;
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_api;
+
+#[cfg(not(target_arch = "wasm32"))]
 use commands::*;
+#[cfg(not(target_arch = "wasm32"))]
 use state::AlignmentCache;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

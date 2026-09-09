@@ -12,7 +12,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { AlignmentSummary, CatalogSortField, OrfSearchMode } from '../types';
-import { shouldSkipOrfLocus } from '../parsers/clientParser';
+import { shouldSkipOrfLocus } from '../sequenceDisplay';
 
 export interface CatalogViewProps {
   summaries: AlignmentSummary[];
@@ -31,6 +31,7 @@ export interface CatalogViewProps {
   sortField?: CatalogSortField;
   sortAsc?: boolean;
   onSortChange?: (field: CatalogSortField, asc: boolean) => void;
+  onVisibleOrderChange?: (filePaths: string[]) => void;
   orfEnabled?: boolean;
   orfSearchMode?: OrfSearchMode;
   skipNonCodingOrf?: boolean;
@@ -56,6 +57,7 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
   sortField: controlledSortField,
   sortAsc: controlledSortAsc,
   onSortChange,
+  onVisibleOrderChange,
   orfEnabled = false,
   orfSearchMode = 'continuouscds',
   skipNonCodingOrf = true,
@@ -111,6 +113,14 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
     }
   };
 
+  // Tab counts scan every summary, so memoise them rather than recomputing two
+  // full passes on each render of a dataset with thousands of loci.
+  const { passCount, failCount } = useMemo(() => {
+    let passing = 0;
+    for (const summary of summaries) if (summary.pass) passing++;
+    return { passCount: passing, failCount: summaries.length - passing };
+  }, [summaries]);
+
   const filteredAndSorted = useMemo(() => {
     const searchLower = searchTerm.toLowerCase();
     const result = summaries.filter((item) => {
@@ -145,6 +155,12 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
 
     return result;
   }, [summaries, searchTerm, statusFilter, sortField, sortAsc]);
+
+  // Report the visible order so the alignment viewer can step through the loci
+  // in the same sequence the user sees here.
+  useEffect(() => {
+    onVisibleOrderChange?.(filteredAndSorted.map((item) => item.file_path));
+  }, [filteredAndSorted, onVisibleOrderChange]);
 
   const totalRows = filteredAndSorted.length;
   const totalHeight = totalRows * ROW_HEIGHT;
@@ -197,7 +213,7 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
                   : 'text-[#8b949e] hover:text-emerald-400'
               }`}
             >
-              Pass ({summaries.filter((s) => s.pass).length})
+              Pass ({passCount})
             </button>
             <button
               onClick={() => setStatusFilter('fail')}
@@ -207,7 +223,7 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
                   : 'text-[#8b949e] hover:text-rose-400'
               }`}
             >
-              Fail ({summaries.filter((s) => !s.pass).length})
+              Fail ({failCount})
             </button>
           </div>
         </div>

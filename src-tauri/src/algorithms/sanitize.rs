@@ -153,11 +153,16 @@ pub fn convert_ambiguous_consensus(
                 .iter()
                 .map(|s| {
                     s.char_indices()
-                        .map(|(col, c)| match c.to_ascii_uppercase() {
-                            'R' | 'Y' | 'S' | 'W' | 'K' | 'M' | 'B' | 'D' | 'H' | 'V' => {
-                                majority_bases.get(col).copied().unwrap_or('A')
+                        .map(|(col, c)| {
+                            // Match on the uppercase form but return the original
+                            // character, otherwise this strategy also rewrites the
+                            // case of every unambiguous base in the alignment.
+                            match c.to_ascii_uppercase() {
+                                'R' | 'Y' | 'S' | 'W' | 'K' | 'M' | 'B' | 'D' | 'H' | 'V' => {
+                                    majority_bases.get(col).copied().unwrap_or('A')
+                                }
+                                _ => c,
                             }
-                            other => other,
                         })
                         .collect()
                 })
@@ -169,6 +174,19 @@ pub fn convert_ambiguous_consensus(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn majority_base_keeps_the_original_case() {
+        let seqs = vec![
+            "acgtr".to_string(),
+            "acgta".to_string(),
+            "acgta".to_string(),
+        ];
+        let out = convert_ambiguous_consensus(&seqs, AmbiguityStrategy::MajorityBase);
+        // Only the ambiguity code changes; every other base keeps its case.
+        assert_eq!(out[0], "acgtA");
+        assert_eq!(out[1], "acgta");
+    }
 
     #[test]
     fn test_replace_n() {

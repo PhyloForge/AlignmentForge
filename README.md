@@ -53,36 +53,36 @@ You do not need your own alignments to see how AlignmentForge works. This reposi
 
 ### Exon-only alignments
 
-`example_data/exons/` — Ten exon-only phylip alignment files for frog phylogenomics.
+`public/example_data/exons/` — Ten exon-only PHYLIP alignment files for frog phylogenomics.
 
 **[▶ Open it live](https://phyloforge.github.io/AlignmentForge/?run=example_data/exons)**
 
 | Get it | How |
 |---|---|
-| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/exons) | See the sample files |
-| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `example_data/exons/` is inside it |
+| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/public/example_data/exons) | See the sample files |
+| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `public/example_data/exons/` is inside it |
 
 ### UCE alignments
 
-`example_data/uces/` — Ten Ultraconserved Element (UCE) alignments for testing.
+`public/example_data/uces/` — Ten Ultraconserved Element (UCE) alignments for testing.
 
 **[▶ Open it live](https://phyloforge.github.io/AlignmentForge/?run=example_data/uces)**
 
 | Get it | How |
 |---|---|
-| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/uces) | See the sample files |
-| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `example_data/uces/` is inside it |
+| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/public/example_data/uces) | See the sample files |
+| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `public/example_data/uces/` is inside it |
 
 ### All markers combined
 
-`example_data/all_markers/` — A mix of different marker types in a single folder. 
+`public/example_data/all_markers/` — A mix of different marker types in a single folder.
 
 **[▶ Open it live](https://phyloforge.github.io/AlignmentForge/?run=example_data/all_markers)**
 
 | Get it | How |
 |---|---|
-| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/example_data/all_markers) | See the sample files |
-| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `example_data/all_markers/` is inside it |
+| [Browse it on GitHub](https://github.com/PhyloForge/AlignmentForge/tree/main/public/example_data/all_markers) | See the sample files |
+| [Download the whole repository](https://github.com/PhyloForge/AlignmentForge/archive/refs/heads/main.zip) | `public/example_data/all_markers/` is inside it |
 
 ### Loading an example on your machine
 
@@ -92,26 +92,78 @@ git clone https://github.com/PhyloForge/AlignmentForge.git
 ```
 2. Open AlignmentForge (either the web or desktop version).
 3. Click to open a folder.
-4. Select `AlignmentForge/example_data/exons` or one of the other example folders.
+4. Select `AlignmentForge/public/example_data/exons` or one of the other example folders.
 
 ---
 
 ## What to load into AlignmentForge
 
-Load any directory on your computer containing alignment files. 
+Select any directory on your computer that holds alignment files.
 
-AlignmentForge currently natively supports standard formats. Once a directory is selected, the application will scan it, calculate summary statistics, and present a visual catalog of all your loci.
+AlignmentForge reads these file types:
 
-You can then apply filters, trim alignments, inspect the alignment matrix view, and export your curated dataset!
+| Format | Extensions |
+|---|---|
+| FASTA | `.fa`, `.fasta`, `.fna`, `.ffn`, `.faa` |
+| PHYLIP | `.phy`, `.phylip` |
+| NEXUS | `.nex`, `.nexus` |
+| Detected from content | `.aln`, `.txt` |
+
+PHYLIP files can be sequential or interleaved. AlignmentForge searches the
+selected folder and up to four levels of subfolders.
+
+Every sequence in an alignment must have the same length. AlignmentForge
+reports a file it cannot read and continues with the rest of the folder.
+
+After you select a directory, the application scans it, calculates summary
+statistics, and shows a visual catalog of all your loci. You can then apply
+filters, trim alignments, inspect the alignment matrix view, and export your
+curated dataset.
+
+**Export needs the desktop app.** The browser version keeps your data on your
+device and cannot write files to disk.
 
 ---
 
 ## Development
 
-If you want to build the software from source:
+To build the software from source:
 
 1. Install **Node.js** (v20+) and **Rust**.
 2. Clone this repository.
 3. Run `npm install` to install dependencies.
 4. Run `npm run dev` to start the browser development server.
 5. Run `npm run tauri dev` to start the desktop development application.
+
+### Checks
+
+| Command | What it does |
+|---|---|
+| `npm run check` | Runs every check below |
+| `npm run build` | Typechecks and builds the web application |
+| `npm run lint` | Runs ESLint over the frontend code |
+| `npm test` | Runs the engine test suite |
+| `npm run check:display` | Checks the viewer's codon helpers against the engine |
+| `npm run manifests:check` | Verifies the example manifests are current |
+| `npm run icons` | Rebuilds the desktop icons from `public/logo.svg` (macOS) |
+
+### One engine, two builds
+
+The trimming engine is written once, in Rust, under `src-tauri/src`. The desktop
+application links it directly. The browser runs the same code compiled to
+WebAssembly, spread across Web Workers so the loci are processed in parallel and
+the interface never blocks. The two builds therefore cannot disagree.
+
+`npm run build:wasm` compiles the engine for the browser. `npm run dev` and
+`npm run build` do this for you, so you need the `wasm32-unknown-unknown` Rust
+target and `wasm-pack`:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+```
+
+The browser once carried its own copy of the pipeline in TypeScript. That copy
+is gone. Only two small display helpers remain in TypeScript, because the viewer
+translates codons for every frame it draws; `npm run check:display` checks them
+against the engine's rules.

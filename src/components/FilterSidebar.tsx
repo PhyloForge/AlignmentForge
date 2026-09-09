@@ -34,6 +34,14 @@ interface FilterSidebarProps {
   totalCount: number;
 }
 
+/**
+ * Upper bound for a count slider. A configuration file can hold a value above
+ * the usual range, and a fixed `max` would snap it down as soon as the user
+ * touched the control. Widening the track to fit keeps the loaded value intact.
+ */
+const sliderMax = (standardMax: number, currentValue: number | undefined): number =>
+  Math.max(standardMax, Math.ceil(currentValue ?? 0));
+
 export const FilterSidebar: React.FC<FilterSidebarProps> = ({
   recipes,
   recipe,
@@ -44,10 +52,22 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
   passedCount,
   totalCount,
 }) => {
-  const [collapsedSections, setCollapsedSections] = React.useState<Record<string, boolean>>({});
+  // Every filter section starts closed, so the sidebar opens as a short list of
+  // headings rather than a long scroll of controls.
+  const [collapsedSections, setCollapsedSections] = React.useState<Record<string, boolean>>({
+    gating: true,
+    coverage: true,
+    sanitation: true,
+    external: true,
+    hmm: true,
+    segments: true,
+    orf: true,
+    columns: true,
+    stat_columns: true,
+  });
   const [configAction, setConfigAction] = React.useState<'export' | 'load' | null>(null);
   const [configNotice, setConfigNotice] = React.useState<{
-    kind: 'success' | 'error';
+    kind: 'success' | 'warning' | 'error';
     message: string;
   } | null>(null);
   const [sampleOccupancyDraft, setSampleOccupancyDraft] = React.useState(
@@ -155,13 +175,22 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
     setConfigAction(action);
     setConfigNotice(null);
     try {
+      const referenceCount = Object.keys(recipe.orf_reference_sequences ?? {}).length;
       const filePath = action === 'export' ? await onExportFilters() : await onLoadFilters();
       if (filePath) {
         const fileName = filePath.split(/[\\/]/).pop() || filePath;
-        setConfigNotice({
-          kind: 'success',
-          message: action === 'export' ? `Exported ${fileName}` : `Loaded ${fileName}`,
-        });
+        if (action === 'export' && referenceCount > 0) {
+          // The config keeps filter settings only, so say what was left out.
+          setConfigNotice({
+            kind: 'warning',
+            message: `Exported ${fileName}. ${referenceCount} ORF reference sequences were not saved; load your reference file again after you load this configuration.`,
+          });
+        } else {
+          setConfigNotice({
+            kind: 'success',
+            message: action === 'export' ? `Exported ${fileName}` : `Loaded ${fileName}`,
+          });
+        }
       }
     } catch (error) {
       setConfigNotice({
@@ -215,7 +244,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           <button
             onClick={() => runConfigAction('load')}
             disabled={configAction !== null}
-            className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded bg-[#192b23] hover:bg-[#203a2e] text-emerald-300 border border-emerald-500/30 text-[11px] font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
+            className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded bg-[#1f242e] hover:bg-[#2a313d] text-[#c9d1d9] border border-[#3a4250] text-[11px] font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
             title="Load filters from an editable AlignmentForge TOML file"
           >
             {configAction === 'load' ? (
@@ -228,7 +257,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           <button
             onClick={() => runConfigAction('export')}
             disabled={configAction !== null}
-            className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded bg-[#1d273b] hover:bg-[#25334d] text-blue-300 border border-blue-500/30 text-[11px] font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
+            className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded bg-[#1f242e] hover:bg-[#2a313d] text-[#c9d1d9] border border-[#3a4250] text-[11px] font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
             title="Save the current filters as an editable AlignmentForge TOML file"
           >
             {configAction === 'export' ? (
@@ -269,6 +298,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className={`flex items-start gap-1.5 rounded px-2 py-1.5 text-[10px] ${
               configNotice.kind === 'success'
                 ? 'bg-emerald-500/10 text-emerald-300'
+                : configNotice.kind === 'warning'
+                ? 'bg-amber-500/10 text-amber-300'
                 : 'bg-red-500/10 text-red-300'
             }`}
           >
@@ -351,7 +382,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                     <input
                       type="range"
                       min="2"
-                      max="50"
+                      max={sliderMax(200, recipe.min_taxa)}
                       step="1"
                       value={recipe.min_taxa}
                       onChange={(e) => update('min_taxa', parseInt(e.target.value))}
@@ -369,7 +400,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                     <input
                       type="range"
                       min="50"
-                      max="1000"
+                      max={sliderMax(5000, recipe.min_length)}
                       step="25"
                       value={recipe.min_length}
                       onChange={(e) => update('min_length', parseInt(e.target.value))}
@@ -398,18 +429,18 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Min Variable Sites</span>
-                      <span className="font-mono text-cyan-400 font-semibold">
+                      <span className="font-mono text-emerald-400 font-semibold">
                         {recipe.min_variable_count ?? 0}
                       </span>
                     </div>
                     <input
                       type="range"
                       min="0"
-                      max="1000"
+                      max={sliderMax(1000, recipe.min_variable_count ?? 0)}
                       step="1"
                       value={recipe.min_variable_count ?? 0}
                       onChange={(e) => update('min_variable_count', parseInt(e.target.value))}
-                      className="w-full accent-cyan-500"
+                      className="w-full accent-emerald-500"
                     />
                     <div className="text-[10px] text-[#8b949e] mt-0.5">
                       {(recipe.min_variable_count ?? 0) === 0
@@ -421,7 +452,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Min Variable-Site Proportion</span>
-                      <span className="font-mono text-cyan-400 font-semibold">
+                      <span className="font-mono text-emerald-400 font-semibold">
                         {(recipe.min_variable_percent ?? 0).toFixed(1)}%
                       </span>
                     </div>
@@ -432,7 +463,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       step="0.5"
                       value={recipe.min_variable_percent ?? 0}
                       onChange={(e) => update('min_variable_percent', parseFloat(e.target.value))}
-                      className="w-full accent-cyan-500"
+                      className="w-full accent-emerald-500"
                     />
                     <div className="text-[10px] text-[#8b949e] mt-0.5">
                       {(recipe.min_variable_percent ?? 0) === 0
@@ -451,7 +482,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                     <input
                       type="range"
                       min="0"
-                      max="1000"
+                      max={sliderMax(1000, recipe.min_pis_count ?? 0)}
                       step="1"
                       value={recipe.min_pis_count ?? 0}
                       onChange={(e) => update('min_pis_count', parseInt(e.target.value))}
@@ -490,7 +521,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
         {/* Display 2: Sanitation */}
         <div
-          className="shrink-0 border border-[#232833] rounded-lg bg-[#171b22]/40 overflow-hidden"
+          className="shrink-0 border border-sky-500/30 rounded-lg bg-sky-500/[0.035] overflow-hidden"
           style={{ order: 2 }}
         >
           <button
@@ -498,8 +529,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className="w-full px-3 py-2 bg-[#1b2029]/60 flex items-center justify-between text-[#c9d1d9] font-medium"
           >
             <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded flex items-center justify-center text-blue-400"><Eraser className="w-3.5 h-3.5" /></span>
-              <span>Sanitation & Ambiguities</span>
+              <span className="w-5 h-5 rounded flex items-center justify-center text-sky-400"><Eraser className="w-3.5 h-3.5" /></span>
+              <span className="font-semibold text-sky-300">Sanitation & Ambiguities</span>
             </div>
             {collapsedSections['sanitation'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -515,7 +546,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.replace_n_with_gap}
                   onChange={(e) => update('replace_n_with_gap', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-blue-500 focus:ring-0"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-sky-500 focus:ring-0"
                 />
                 <span className="text-[#c9d1d9]">Replace 'N' / '?' with '-'</span>
               </label>
@@ -525,7 +556,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.remove_gap_only_columns ?? true}
                   onChange={(e) => update('remove_gap_only_columns', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-blue-500 focus:ring-0"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-sky-500 focus:ring-0"
                 />
                 <span className="text-[#c9d1d9]">Remove Gap-Only Columns</span>
               </label>
@@ -554,7 +585,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
         {/* Display 5: Profile HMM Segment Cleaner (TAPIR-Style) */}
         <div
-          className="shrink-0 border border-[#232833] rounded-lg bg-[#171b22]/40 overflow-hidden"
+          className="shrink-0 border border-pink-500/30 rounded-lg bg-pink-500/[0.035] overflow-hidden"
           style={{ order: 5 }}
         >
           <button
@@ -562,8 +593,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className="w-full px-3 py-2 bg-[#1b2029]/60 flex items-center justify-between text-[#c9d1d9] font-medium"
           >
             <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded flex items-center justify-center text-indigo-400"><Activity className="w-3.5 h-3.5" /></span>
-              <span>Profile HMM Cleaner</span>
+              <span className="w-5 h-5 rounded flex items-center justify-center text-pink-400"><Activity className="w-3.5 h-3.5" /></span>
+              <span className="font-semibold text-pink-300">Profile HMM Cleaner</span>
             </div>
             {collapsedSections['hmm'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -580,7 +611,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.trim_hmm ?? false}
                   onChange={(e) => update('trim_hmm', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-indigo-500 focus:ring-0"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-pink-500 focus:ring-0"
                 />
               </label>
 
@@ -589,7 +620,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Min Posterior Match Confidence</span>
-                      <span className="font-mono text-indigo-400 font-semibold">
+                      <span className="font-mono text-pink-400 font-semibold">
                         {((recipe.hmm_min_posterior ?? 0.45) * 100).toFixed(0)}%
                       </span>
                     </div>
@@ -600,7 +631,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       step="0.05"
                       value={recipe.hmm_min_posterior ?? 0.45}
                       onChange={(e) => update('hmm_min_posterior', parseFloat(e.target.value))}
-                      className="w-full accent-indigo-500"
+                      className="w-full accent-pink-500"
                     />
                     <div className="text-[10px] text-[#8b949e] mt-0.5">
                       Residues with posterior match confidence below threshold are flagged as misaligned.
@@ -610,18 +641,18 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Min Aberrant Segment Length</span>
-                      <span className="font-mono text-indigo-400 font-semibold">
+                      <span className="font-mono text-pink-400 font-semibold">
                         {recipe.hmm_min_segment_length ?? 8} bp
                       </span>
                     </div>
                     <input
                       type="range"
                       min="4"
-                      max="30"
+                      max={sliderMax(30, recipe.hmm_min_segment_length ?? 8)}
                       step="1"
                       value={recipe.hmm_min_segment_length ?? 8}
                       onChange={(e) => update('hmm_min_segment_length', parseInt(e.target.value))}
-                      className="w-full accent-indigo-500"
+                      className="w-full accent-pink-500"
                     />
                     <div className="text-[10px] text-[#8b949e] mt-0.5">
                       Requires at least this many contiguous low-confidence residues to trigger masking.
@@ -631,18 +662,18 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div className="pt-2">
                     <div className="flex items-center justify-between mb-1 text-[11px]">
                       <span className="text-[#8b949e]">Min Distance Between Masked</span>
-                      <span className="font-mono text-indigo-400 font-semibold">
+                      <span className="font-mono text-pink-400 font-semibold">
                         {recipe.hmm_min_island_length ?? 20} bp
                       </span>
                     </div>
                     <input
                       type="range"
                       min="0"
-                      max="100"
+                      max={sliderMax(100, recipe.hmm_min_island_length ?? 20)}
                       step="1"
                       value={recipe.hmm_min_island_length ?? 20}
                       onChange={(e) => update('hmm_min_island_length', parseInt(e.target.value))}
-                      className="w-full accent-indigo-500"
+                      className="w-full accent-pink-500"
                     />
                     <div className="text-[10px] text-[#8b949e] mt-0.5">
                       Merges masked segments separated by fewer than this many good bases.
@@ -656,7 +687,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
         {/* Display 6: Sliding Window Segment Masking */}
         <div
-          className="shrink-0 border border-[#232833] rounded-lg bg-[#171b22]/40 overflow-hidden"
+          className="shrink-0 border border-teal-500/30 rounded-lg bg-teal-500/[0.035] overflow-hidden"
           style={{ order: 6 }}
         >
           <button
@@ -664,8 +695,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className="w-full px-3 py-2 bg-[#1b2029]/60 flex items-center justify-between text-[#c9d1d9] font-medium"
           >
             <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded flex items-center justify-center text-amber-400"><Scissors className="w-3.5 h-3.5" /></span>
-              <span>Sliding Window Segment Mask</span>
+              <span className="w-5 h-5 rounded flex items-center justify-center text-teal-400"><Scissors className="w-3.5 h-3.5" /></span>
+              <span className="font-semibold text-teal-300">Sliding Window Segment Mask</span>
             </div>
             {collapsedSections['segments'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -682,7 +713,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.trim_segments}
                   onChange={(e) => update('trim_segments', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-amber-500 focus:ring-0"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-teal-500 focus:ring-0"
                 />
               </label>
 
@@ -691,25 +722,25 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Window Size (bp)</span>
-                      <span className="font-mono text-amber-400 font-semibold">
+                      <span className="font-mono text-teal-400 font-semibold">
                         {recipe.segment_window_size} bp
                       </span>
                     </div>
                     <input
                       type="range"
                       min="30"
-                      max="300"
+                      max={sliderMax(300, recipe.segment_window_size)}
                       step="10"
                       value={recipe.segment_window_size}
                       onChange={(e) => update('segment_window_size', parseInt(e.target.value))}
-                      className="w-full accent-amber-500"
+                      className="w-full accent-teal-500"
                     />
                   </div>
 
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Window Divergence Cutoff</span>
-                      <span className="font-mono text-amber-400 font-semibold">
+                      <span className="font-mono text-teal-400 font-semibold">
                         {(recipe.segment_threshold * 100).toFixed(0)}%
                       </span>
                     </div>
@@ -720,7 +751,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       step="0.01"
                       value={recipe.segment_threshold}
                       onChange={(e) => update('segment_threshold', parseFloat(e.target.value))}
-                      className="w-full accent-amber-500"
+                      className="w-full accent-teal-500"
                     />
                   </div>
                 </>
@@ -828,7 +859,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                         <input
                           type="range"
                           min="5"
-                          max="300"
+                          max={sliderMax(300, orfSegmentDraft)}
                           step="5"
                           value={orfSegmentDraft}
                           onChange={(e) => setOrfSegmentDraft(parseInt(e.target.value))}
@@ -924,7 +955,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
         {/* Display 3: External Edge Trimming */}
         <div
-          className="shrink-0 border border-[#232833] rounded-lg bg-[#171b22]/40 overflow-hidden"
+          className="shrink-0 border border-orange-500/30 rounded-lg bg-orange-500/[0.035] overflow-hidden"
           style={{ order: 3 }}
         >
           <button
@@ -932,8 +963,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className="w-full px-3 py-2 bg-[#1b2029]/60 flex items-center justify-between text-[#c9d1d9] font-medium"
           >
             <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded flex items-center justify-center text-cyan-400"><Crop className="w-3.5 h-3.5" /></span>
-              <span>Ragged Edge Trimming</span>
+              <span className="w-5 h-5 rounded flex items-center justify-center text-orange-400"><Crop className="w-3.5 h-3.5" /></span>
+              <span className="font-semibold text-orange-300">Ragged Edge Trimming</span>
             </div>
             {collapsedSections['external'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -950,7 +981,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.trim_external}
                   onChange={(e) => update('trim_external', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-cyan-500 focus:ring-0"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-orange-500 focus:ring-0"
                 />
               </label>
 
@@ -959,7 +990,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Minimum Taxa Occupancy</span>
-                      <span className="font-mono text-cyan-400 font-semibold">
+                      <span className="font-mono text-orange-400 font-semibold">
                         {recipe.min_external_percent}%
                       </span>
                     </div>
@@ -970,7 +1001,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       step="5"
                       value={recipe.min_external_percent}
                       onChange={(e) => update('min_external_percent', parseFloat(e.target.value))}
-                      className="w-full accent-cyan-500"
+                      className="w-full accent-orange-500"
                     />
                   </div>
 
@@ -980,7 +1011,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       checked={recipe.enable_orf ? true : recipe.codon_preserving}
                       disabled={recipe.enable_orf}
                       onChange={(e) => update('codon_preserving', e.target.checked)}
-                      className="rounded bg-[#1f242e] border-[#2d3545] text-cyan-500 focus:ring-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="rounded bg-[#1f242e] border-[#2d3545] text-orange-500 focus:ring-0 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                     <span className="text-[#c9d1d9]">Codon-Preserving Frame Snapping</span>
                   </label>
@@ -992,7 +1023,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
         {/* Display 8: Column Gap Filter */}
         <div
-          className="shrink-0 border border-[#232833] rounded-lg bg-[#171b22]/40 overflow-hidden"
+          className="shrink-0 border border-red-500/30 rounded-lg bg-red-500/[0.035] overflow-hidden"
           style={{ order: 8 }}
         >
           <button
@@ -1000,8 +1031,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className="w-full px-3 py-2 bg-[#1b2029]/60 flex items-center justify-between text-[#c9d1d9] font-medium"
           >
             <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded flex items-center justify-center text-rose-400"><Columns className="w-3.5 h-3.5" /></span>
-              <span>Column Gap Filter</span>
+              <span className="w-5 h-5 rounded flex items-center justify-center text-red-400"><Columns className="w-3.5 h-3.5" /></span>
+              <span className="font-semibold text-red-300">Column Gap Filter</span>
             </div>
             {collapsedSections['columns'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -1027,7 +1058,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.trim_columns}
                   onChange={(e) => update('trim_columns', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-rose-500 focus:ring-0"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-red-500 focus:ring-0"
                 />
               </label>
 
@@ -1036,7 +1067,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-[#8b949e]">Max Allowed Column Gap %</span>
-                      <span className="font-mono text-rose-400 font-semibold">
+                      <span className="font-mono text-red-400 font-semibold">
                         {recipe.min_column_gap_percent}%
                       </span>
                     </div>
@@ -1049,7 +1080,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       onChange={(e) =>
                         update('min_column_gap_percent', parseFloat(e.target.value))
                       }
-                      className="w-full accent-rose-500"
+                      className="w-full accent-red-500"
                     />
                   </div>
 
@@ -1058,7 +1089,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       type="checkbox"
                       checked={recipe.count_n_as_gap}
                       onChange={(e) => update('count_n_as_gap', e.target.checked)}
-                      className="rounded bg-[#1f242e] border-[#2d3545] text-rose-500 focus:ring-0"
+                      className="rounded bg-[#1f242e] border-[#2d3545] text-red-500 focus:ring-0"
                     />
                     <span className="text-[#c9d1d9]">Count 'N' and '?' as gaps</span>
                   </label>
@@ -1070,7 +1101,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
         {/* Display 9: Statistical Column Trimming (trimAl & Gblocks) */}
         <div
-          className="shrink-0 border border-[#232833] rounded-lg bg-[#171b22]/40 overflow-hidden"
+          className="shrink-0 border border-yellow-500/30 rounded-lg bg-yellow-500/[0.035] overflow-hidden"
           style={{ order: 9 }}
         >
           <button
@@ -1078,8 +1109,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
             className="w-full px-3 py-2 bg-[#1b2029]/60 flex items-center justify-between text-[#c9d1d9] font-medium"
           >
             <div className="flex items-center gap-2">
-              <span className="w-5 h-5 rounded flex items-center justify-center text-indigo-400"><BarChart2 className="w-3.5 h-3.5" /></span>
-              <span>Statistical Column Trimming</span>
+              <span className="w-5 h-5 rounded flex items-center justify-center text-yellow-400"><BarChart2 className="w-3.5 h-3.5" /></span>
+              <span className="font-semibold text-yellow-300">Statistical Column Trimming</span>
             </div>
             {collapsedSections['stat_columns'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -1105,7 +1136,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   type="checkbox"
                   checked={recipe.enable_statistical_columns}
                   onChange={(e) => update('enable_statistical_columns', e.target.checked)}
-                  className="rounded bg-[#1f242e] border-[#2d3545] text-indigo-500 focus:ring-0 cursor-pointer"
+                  className="rounded bg-[#1f242e] border-[#2d3545] text-yellow-500 focus:ring-0 cursor-pointer"
                 />
               </label>
 
@@ -1148,7 +1179,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                         <div>
                           <div className="flex justify-between text-[11px] mb-1">
                             <span className="text-[#8b949e]">Min Column Similarity</span>
-                            <span className="font-mono text-indigo-400 font-semibold">
+                            <span className="font-mono text-yellow-400 font-semibold">
                               {(recipe.stat_col_similarity_threshold ?? 0.35).toFixed(2)}
                             </span>
                           </div>
@@ -1161,7 +1192,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                             onChange={(e) =>
                               update('stat_col_similarity_threshold', parseFloat(e.target.value))
                             }
-                            className="w-full accent-indigo-500"
+                            className="w-full accent-yellow-500"
                           />
                         </div>
                       )}
@@ -1169,7 +1200,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Smoothing Window Size</span>
-                          <span className="font-mono text-indigo-400 font-semibold">
+                          <span className="font-mono text-yellow-400 font-semibold">
                             {recipe.stat_col_window_size ?? 3} bp
                           </span>
                         </div>
@@ -1182,7 +1213,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                           onChange={(e) =>
                             update('stat_col_window_size', parseInt(e.target.value))
                           }
-                          className="w-full accent-indigo-500"
+                          className="w-full accent-yellow-500"
                         />
                       </div>
                     </>
@@ -1193,20 +1224,20 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Min Conserved Block Length</span>
-                          <span className="font-mono text-indigo-400 font-semibold">
+                          <span className="font-mono text-yellow-400 font-semibold">
                             {recipe.stat_col_min_block_length ?? 5} bp
                           </span>
                         </div>
                         <input
                           type="range"
                           min="3"
-                          max="20"
+                          max={sliderMax(20, recipe.stat_col_min_block_length ?? 5)}
                           step="1"
                           value={recipe.stat_col_min_block_length ?? 5}
                           onChange={(e) =>
                             update('stat_col_min_block_length', parseInt(e.target.value))
                           }
-                          className="w-full accent-indigo-500"
+                          className="w-full accent-yellow-500"
                         />
                         <div className="text-[10px] text-[#8b949e] mt-0.5">
                           Removes isolated conserved spikes &lt; {recipe.stat_col_min_block_length ?? 5} bp
@@ -1235,7 +1266,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Max Column Shannon Entropy</span>
-                          <span className="font-mono text-indigo-400 font-semibold">
+                          <span className="font-mono text-yellow-400 font-semibold">
                             {(recipe.stat_col_entropy_threshold ?? 1.5).toFixed(2)} bits
                           </span>
                         </div>
@@ -1248,7 +1279,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                           onChange={(e) =>
                             update('stat_col_entropy_threshold', parseFloat(e.target.value))
                           }
-                          className="w-full accent-indigo-500"
+                          className="w-full accent-yellow-500"
                         />
                         <div className="text-[10px] text-[#8b949e] mt-0.5">
                           Max theoretical randomness is 2.0 bits (drops high-entropy noise)
@@ -1258,7 +1289,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       <div>
                         <div className="flex justify-between text-[11px] mb-1">
                           <span className="text-[#8b949e]">Smoothing Window Size</span>
-                          <span className="font-mono text-indigo-400 font-semibold">
+                          <span className="font-mono text-yellow-400 font-semibold">
                             {recipe.stat_col_window_size ?? 3} bp
                           </span>
                         </div>
@@ -1271,7 +1302,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                           onChange={(e) =>
                             update('stat_col_window_size', parseInt(e.target.value))
                           }
-                          className="w-full accent-indigo-500"
+                          className="w-full accent-yellow-500"
                         />
                       </div>
                     </>
@@ -1293,7 +1324,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           >
             <div className="flex items-center gap-2">
               <span className="w-5 h-5 rounded flex items-center justify-center text-purple-400"><Filter className="w-3.5 h-3.5" /></span>
-              <span className="text-purple-200">Sample Filter Criteria</span>
+              <span className="font-semibold text-purple-300">Sample Filter Criteria</span>
             </div>
             {collapsedSections['coverage'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -1304,6 +1335,49 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
 
           {!collapsedSections['coverage'] && (
             <div className="p-3 space-y-3">
+              {/* Samples discarded by hand from the alignment viewer. Listed here
+                  so the choice stays visible and can be undone from one place. */}
+              {(recipe.discarded_taxa?.length ?? 0) > 0 && (
+                <div className="rounded border border-fuchsia-500/30 bg-fuchsia-500/[0.06] p-2 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-fuchsia-300">
+                      Discarded Samples ({recipe.discarded_taxa?.length})
+                    </span>
+                    <button
+                      onClick={() => update('discarded_taxa', [])}
+                      className="text-[10px] text-[#8b949e] hover:text-[#c9d1d9] underline"
+                    >
+                      Restore all
+                    </button>
+                  </div>
+                  <div className="max-h-28 overflow-y-auto space-y-0.5">
+                    {(recipe.discarded_taxa ?? []).map((taxon) => (
+                      <div key={taxon} className="flex items-center justify-between gap-2 group">
+                        <span className="font-mono text-[10px] text-fuchsia-200/90 truncate" title={taxon}>
+                          {taxon}
+                        </span>
+                        <button
+                          onClick={() =>
+                            update(
+                              'discarded_taxa',
+                              (recipe.discarded_taxa ?? []).filter((name) => name !== taxon)
+                            )
+                          }
+                          className="shrink-0 text-[10px] text-[#8b949e] hover:text-fuchsia-200"
+                          title={`Restore ${taxon}`}
+                        >
+                          Restore
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[#8b949e] leading-snug">
+                    Removed from every locus. Click a sample name in the alignment
+                    viewer to discard another.
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-2.5">
                 <label className="flex items-center justify-between cursor-pointer">
                   <span className="text-[#c9d1d9]">Drop samples below</span>
@@ -1404,7 +1478,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                     <input
                       type="range"
                       min="0"
-                      max="500"
+                      max={sliderMax(2000, recipe.min_coverage_bp)}
                       step="10"
                       value={recipe.min_coverage_bp}
                       onChange={(e) => update('min_coverage_bp', parseInt(e.target.value))}

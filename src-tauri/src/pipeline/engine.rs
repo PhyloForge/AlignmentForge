@@ -393,10 +393,10 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
                 }
             }
 
-            let mut new_raw_col_map = Vec::with_capacity(current_seqs[0].len());
-            for idx in 0..current_seqs[0].len() {
+            let mut new_raw_col_map = Vec::with_capacity(raw_col_map.len());
+            for (idx, raw_column) in raw_col_map.iter().enumerate() {
                 if !dropped_set.contains(&idx) {
-                    new_raw_col_map.push(raw_col_map[idx]);
+                    new_raw_col_map.push(*raw_column);
                 }
             }
             raw_col_map = new_raw_col_map;

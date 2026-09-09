@@ -12,12 +12,35 @@ use crate::models::{
 use crate::parsers::parse_alignment;
 use crate::pipeline::catalog::{
     evaluate_recipe_on_alignments_with_progress_and_cancel,
-    evaluate_recipe_on_summaries_with_progress, recipe_with_dataset_sample_filter,
-    scan_alignment_directory,
+    evaluate_recipe_on_summaries_with_progress, recipe_with_taxon_presence,
+    scan_alignment_directory, ParseFailure,
 };
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
 use crate::state::AlignmentCache;
+
+/// Runs pipeline work and turns a panic into an error the user can see.
+///
+/// The release profile unwinds, so one malformed alignment reports a failed
+/// command instead of closing the application.
+fn guard_panics<T, F>(what: &str, work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    // The Tauri handle is not `UnwindSafe`, but nothing here observes state
+    // after a panic: the result is discarded and an error is returned instead.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown error".to_string());
+            Err(format!("{what} failed unexpectedly: {detail}"))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressPayload {
@@ -41,6 +64,9 @@ pub struct ScanResponse {
     pub summaries: Vec<AlignmentSummary>,
     pub overview: DatasetOverview,
     pub occupancy: Vec<TaxonOccupancy>,
+    /// Files found in the folder that could not be parsed.
+    #[serde(default)]
+    pub parse_failures: Vec<ParseFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,8 +92,9 @@ pub async fn scan_directory(
 ) -> Result<ScanResponse, String> {
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+      guard_panics("Directory scan", move || {
         let app_clone = app.clone();
-        let (summaries, overview, occupancy, alignments) =
+        let (summaries, overview, occupancy, alignments, parse_failures) =
             scan_alignment_directory(&dir_path, Some(move |cur, total, name: &str| {
                 let pct = if total > 0 {
                     (cur as f64 / total as f64) * 100.0
@@ -91,7 +118,9 @@ pub async fn scan_directory(
             summaries,
             overview,
             occupancy,
+            parse_failures,
         })
+      })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -106,15 +135,18 @@ pub async fn get_alignment(
 ) -> Result<AlignmentViewResponse, String> {
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
+      guard_panics("Opening the alignment", move || {
         let raw = match cache.get(&file_path) {
             Some(align) => align,
             None => parse_alignment(PathBuf::from(&file_path))?,
         };
-        let mut dataset_alignments = cache.get_all();
-        if !dataset_alignments.iter().any(|alignment| alignment.file_path == raw.file_path) {
-            dataset_alignments.push(raw.clone());
+        // Only the taxon lists matter here, so avoid copying the whole dataset's
+        // sequences every time the user opens an alignment.
+        let mut dataset_taxa = cache.taxon_presence();
+        if !cache.contains(&raw.file_path) {
+            dataset_taxa.push(raw.taxa.clone());
         }
-        let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &dataset_alignments);
+        let runtime_recipe = recipe_with_taxon_presence(&recipe, &dataset_taxa);
         let (trimmed, diff) = apply_recipe(&raw, &runtime_recipe, total_unique_taxa);
 
         let (_, _, pis_mask) =
@@ -129,6 +161,7 @@ pub async fn get_alignment(
             pis_mask,
             majority_consensus,
         })
+      })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -146,6 +179,7 @@ pub async fn recalculate_catalog(
     let cache = state.inner().clone();
     let generation = cache.begin_catalog_job();
     tokio::task::spawn_blocking(move || {
+      guard_panics("Catalog recalculation", move || {
         let cached = cache.get_by_paths(&paths);
         let app_clone = app.clone();
         let progress_job_id = job_id.clone();
@@ -194,6 +228,7 @@ pub async fn recalculate_catalog(
         }
         overview.total_unique_taxa = total_unique_taxa;
         Ok(CatalogUpdateResponse { summaries, overview })
+      })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -207,9 +242,10 @@ pub async fn run_batch_export(
 ) -> Result<BatchExportResult, String> {
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let dataset_alignments = cache.get_all();
-        let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &dataset_alignments);
+      guard_panics("Batch export", move || {
+        let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
         execute_batch_export(&config, &runtime_recipe)
+      })
     })
         .await
         .map_err(|e| e.to_string())?
@@ -223,9 +259,10 @@ pub async fn run_concatenate(
 ) -> Result<ConcatenateResult, String> {
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let dataset_alignments = cache.get_all();
-        let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &dataset_alignments);
+      guard_panics("Supermatrix assembly", move || {
+        let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
         concatenate_alignments(&config, &runtime_recipe)
+      })
     })
         .await
         .map_err(|e| e.to_string())?
@@ -239,9 +276,10 @@ pub async fn run_grouped_concatenate(
 ) -> Result<GroupedConcatenateResult, String> {
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let dataset_alignments = cache.get_all();
-        let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &dataset_alignments);
+      guard_panics("Gene concatenation", move || {
+        let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
         concatenate_alignments_by_gene(&config, &runtime_recipe)
+      })
     })
         .await
         .map_err(|e| e.to_string())?

@@ -69,10 +69,16 @@ pub struct TrimmingRecipe {
     pub orf_min_coding_score: f64,
     #[serde(default = "default_true")]
     pub exclude_uce: bool,
-    #[serde(default = "default_true")]
+    // Defaults to false to match `TrimmingRecipe::default()` and every preset.
+    // A `default_true` here silently enabled the check for any config file that
+    // omitted the key.
+    #[serde(default)]
     pub fail_if_no_orf: bool,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub orf_use_references: bool,
+    // Reference sequences are whole exons for every locus, so they are kept out
+    // of the filter config to keep it small and readable. `serialize_filter_config`
+    // records that in the file, and the app warns before it drops them.
     #[serde(default, skip_serializing)]
     pub orf_reference_sequences: HashMap<String, String>,
 
@@ -113,6 +119,10 @@ pub struct TrimmingRecipe {
     pub relative_width: RelativeWidth,
     #[serde(default)]
     pub min_sample_locus_occupancy_percent: f64,
+    /// Samples the user chose to drop by hand. Kept apart from `excluded_taxa`,
+    /// which the catalog derives from the occupancy threshold on every run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discarded_taxa: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_taxa: Vec<String>,
 
@@ -136,10 +146,18 @@ pub struct TrimmingRecipe {
 fn default_true() -> bool {
     true
 }
-fn default_macse_sample() -> usize { 3 }
-fn default_macse_locus() -> usize { 10 }
-fn default_stop_sample() -> usize { 2 }
-fn default_stop_locus() -> usize { 5 }
+fn default_macse_sample() -> usize {
+    3
+}
+fn default_macse_locus() -> usize {
+    10
+}
+fn default_stop_sample() -> usize {
+    2
+}
+fn default_stop_locus() -> usize {
+    5
+}
 
 
 fn default_orf_shared_support() -> f64 {
@@ -241,6 +259,7 @@ impl Default for TrimmingRecipe {
             min_coverage_percent: 50.0,
             relative_width: RelativeWidth::Sample,
             min_sample_locus_occupancy_percent: 0.0,
+            discarded_taxa: Vec::new(),
             excluded_taxa: Vec::new(),
             assess_alignment: true,
             min_taxa: 4,
@@ -256,204 +275,86 @@ impl Default for TrimmingRecipe {
 }
 
 impl TrimmingRecipe {
+    /// Presets state only what they change. Every other field comes from
+    /// `Default::default()`, so a new field needs one edit rather than four.
     pub fn preset_strict() -> Self {
         Self {
             name: "Strict Phylogenomics".to_string(),
             description: "Aggressive filtering for high-confidence core ortholog sets".to_string(),
-            replace_n_with_gap: true,
             ambiguity_strategy: AmbiguityStrategy::FixedStandard,
-            remove_gap_only_columns: true,
-            trim_similarity: true,
             similarity_threshold: 0.35,
             trim_hmm: true,
             hmm_min_posterior: 0.55,
             hmm_min_segment_length: 6,
-            hmm_min_island_length: 20,
             trim_segments: true,
             segment_window_size: 80,
             segment_threshold: 0.40,
-            enable_orf: false,
-            auto_shift_frame: true,
-            auto_flip_reverse: true,
-            stop_codon_action: StopCodonAction::RemoveSample,
-            macse_trim_terminal: true,
-            macse_max_internal_sample: 3,
-            macse_max_internal_locus: 10,
-            max_stop_codons_sample: 2,
-            max_stop_codons_locus: 5,
-            genetic_code: GeneticCode::Standard,
-            orf_search_mode: OrfSearchMode::ContinuousCds,
-            orf_min_shared_support_percent: 90.0,
-            orf_min_segment_aa: 35,
-            orf_min_coding_score: 40.0,
-            exclude_uce: true,
-            fail_if_no_orf: false,
-            orf_use_references: false,
-            orf_reference_sequences: HashMap::new(),
-            trim_external: true,
             min_external_percent: 70.0,
-            codon_preserving: false,
             trim_columns: true,
             min_column_gap_percent: 50.0,
-            count_n_as_gap: true,
             enable_statistical_columns: true,
-            stat_col_method: StatisticalColumnMethod::TrimalSimilarity,
             stat_col_similarity_threshold: 0.40,
-            stat_col_window_size: 3,
             stat_col_heuristic: TrimalHeuristic::Strict,
             stat_col_min_block_length: 6,
             stat_col_max_nonconserved: 3,
             stat_col_gap_treatment: StatColGapTreatment::None,
             stat_col_entropy_threshold: 1.2,
-            trim_coverage: true,
             min_coverage_bp: 150,
             min_coverage_percent: 65.0,
             relative_width: RelativeWidth::Alignment,
-            min_sample_locus_occupancy_percent: 0.0,
-            excluded_taxa: Vec::new(),
-            assess_alignment: true,
-            min_taxa: 4,
             min_taxa_occupancy_percent: 60.0,
             min_length: 200,
             max_gap_percent: 35.0,
-            min_pis_count: 0,
-            min_pis_percent: 0.0,
-            min_variable_count: 0,
-            min_variable_percent: 0.0,
+            ..Default::default()
         }
     }
 
     pub fn preset_relaxed_uce() -> Self {
         Self {
             name: "Relaxed UCE / Sequence Capture".to_string(),
-            description: "Permissive filtering preserving maximum informative flanking sequence".to_string(),
-            replace_n_with_gap: true,
-            ambiguity_strategy: AmbiguityStrategy::Keep,
-            remove_gap_only_columns: true,
-            trim_similarity: true,
+            description: "Permissive filtering preserving maximum informative flanking sequence"
+                .to_string(),
             similarity_threshold: 0.45,
             trim_hmm: true,
             hmm_min_posterior: 0.35,
             hmm_min_segment_length: 12,
             hmm_min_island_length: 30,
-            trim_segments: false,
-            segment_window_size: 100,
-            segment_threshold: 0.45,
-            enable_orf: false,
-            auto_shift_frame: true,
-            auto_flip_reverse: true,
-            stop_codon_action: StopCodonAction::RemoveSample,
-            macse_trim_terminal: true,
-            macse_max_internal_sample: 3,
-            macse_max_internal_locus: 10,
-            max_stop_codons_sample: 2,
-            max_stop_codons_locus: 5,
-            genetic_code: GeneticCode::Standard,
-            orf_search_mode: OrfSearchMode::ContinuousCds,
-            orf_min_shared_support_percent: 90.0,
-            orf_min_segment_aa: 35,
-            orf_min_coding_score: 40.0,
-            exclude_uce: true,
-            fail_if_no_orf: false,
-            orf_use_references: false,
-            orf_reference_sequences: HashMap::new(),
-            trim_external: true,
             min_external_percent: 40.0,
-            codon_preserving: false,
             trim_columns: true,
             min_column_gap_percent: 80.0,
-            count_n_as_gap: true,
-            enable_statistical_columns: false,
-            stat_col_method: StatisticalColumnMethod::TrimalSimilarity,
             stat_col_similarity_threshold: 0.30,
-            stat_col_window_size: 3,
             stat_col_heuristic: TrimalHeuristic::Gappyout,
             stat_col_min_block_length: 4,
             stat_col_max_nonconserved: 5,
             stat_col_gap_treatment: StatColGapTreatment::All,
             stat_col_entropy_threshold: 1.7,
-            trim_coverage: true,
             min_coverage_bp: 40,
             min_coverage_percent: 40.0,
-            relative_width: RelativeWidth::Sample,
-            min_sample_locus_occupancy_percent: 0.0,
-            excluded_taxa: Vec::new(),
-            assess_alignment: true,
-            min_taxa: 4,
             min_taxa_occupancy_percent: 35.0,
             min_length: 80,
             max_gap_percent: 60.0,
-            min_pis_count: 0,
-            min_pis_percent: 0.0,
-            min_variable_count: 0,
-            min_variable_percent: 0.0,
+            ..Default::default()
         }
     }
 
     pub fn preset_exon_codon() -> Self {
         Self {
             name: "Exon / Coding Region".to_string(),
-            description: "Frame-ready exon filtering; enable ORF analysis explicitly in its workspace".to_string(),
-            replace_n_with_gap: true,
+            description:
+                "Frame-ready exon filtering; enable ORF analysis explicitly in its workspace"
+                    .to_string(),
             ambiguity_strategy: AmbiguityStrategy::MajorityBase,
-            remove_gap_only_columns: true,
-            trim_similarity: true,
             similarity_threshold: 0.35,
             trim_hmm: true,
-            hmm_min_posterior: 0.45,
             hmm_min_segment_length: 9,
-            hmm_min_island_length: 20,
-            trim_segments: false,
-            segment_window_size: 100,
-            segment_threshold: 0.45,
-            enable_orf: false,
-            auto_shift_frame: true,
-            auto_flip_reverse: true,
-            stop_codon_action: StopCodonAction::RemoveSample,
-            macse_trim_terminal: true,
-            macse_max_internal_sample: 3,
-            macse_max_internal_locus: 10,
-            max_stop_codons_sample: 2,
-            max_stop_codons_locus: 5,
-            genetic_code: GeneticCode::Standard,
-            orf_search_mode: OrfSearchMode::ContinuousCds,
-            orf_min_shared_support_percent: 90.0,
-            orf_min_segment_aa: 35,
-            orf_min_coding_score: 40.0,
-            exclude_uce: true,
-            fail_if_no_orf: false,
-            orf_use_references: false,
-            orf_reference_sequences: HashMap::new(),
-            trim_external: true,
             min_external_percent: 60.0,
             codon_preserving: true,
             trim_columns: true,
             min_column_gap_percent: 50.0,
-            count_n_as_gap: true,
-            enable_statistical_columns: false,
-            stat_col_method: StatisticalColumnMethod::TrimalSimilarity,
-            stat_col_similarity_threshold: 0.35,
-            stat_col_window_size: 3,
-            stat_col_heuristic: TrimalHeuristic::Custom,
-            stat_col_min_block_length: 5,
-            stat_col_max_nonconserved: 4,
-            stat_col_gap_treatment: StatColGapTreatment::Half,
-            stat_col_entropy_threshold: 1.5,
-            trim_coverage: true,
             min_coverage_bp: 90,
-            min_coverage_percent: 50.0,
-            relative_width: RelativeWidth::Sample,
-            min_sample_locus_occupancy_percent: 0.0,
-            excluded_taxa: Vec::new(),
-            assess_alignment: true,
-            min_taxa: 4,
-            min_taxa_occupancy_percent: 50.0,
             min_length: 120,
             max_gap_percent: 40.0,
-            min_pis_count: 0,
-            min_pis_percent: 0.0,
-            min_variable_count: 0,
-            min_variable_percent: 0.0,
+            ..Default::default()
         }
     }
 }

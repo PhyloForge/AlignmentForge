@@ -100,19 +100,18 @@ pub fn apply_codon_qc(
         return (vec![], vec![], taxa.to_vec());
     }
 
-    let out_seqs = kept_seqs.into_iter().map(|s| String::from_utf8(s).unwrap()).collect();
+    let out_seqs = kept_seqs
+        .into_iter()
+        .map(|s| String::from_utf8(s.clone())
+            .unwrap_or_else(|_| String::from_utf8_lossy(&s).into_owned()))
+        .collect();
     (kept_taxa, out_seqs, dropped_taxa)
 }
 
 pub fn convert_macse_to_n(sequences: &mut [String]) {
     for seq in sequences.iter_mut() {
-        unsafe {
-            let bytes = seq.as_bytes_mut();
-            for b in bytes.iter_mut() {
-                if *b == b'!' {
-                    *b = b'N';
-                }
-            }
+        if seq.as_bytes().contains(&b'!') {
+            *seq = seq.replace('!', "N");
         }
     }
 }

@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for AlignmentForge desktop app",
-  "windows": ["main", "*"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:app:default",
@@ -13,7 +15,6 @@
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",
-    "fs:default",
     "opener:default"
   ]
 }
