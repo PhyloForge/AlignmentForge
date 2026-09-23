@@ -334,6 +334,12 @@ export interface BatchExportResult {
   recipe_json_path?: string;
   total_introns_exported?: number;
   intron_directory_path?: string;
+  total_failed: number;
+  errors: Array<{
+    input_path: string;
+    output_path: string;
+    error: string;
+  }>;
 }
 
 export interface ConcatenateConfig {

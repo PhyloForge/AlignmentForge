@@ -25,7 +25,7 @@ fn section_comment(key: &str) -> Option<&'static str> {
             "# Sanitation\n# ambiguity_strategy: keep | majoritybase | converttogap | fixedstandard\n# remove_gap_only_columns removes columns containing only -, N, or ?",
         ),
         "trim_similarity" => Some("# Paralog / divergence pruning"),
-        "trim_hmm" => Some("# Profile HMM cleaner"),
+        "trim_hmm" => Some("# AlignmentForge profile-confidence cleaner"),
         "trim_segments" => Some("# Sliding-window segment masking"),
         "enable_orf" => Some(
             "# Candidate open reading frame extraction / codon optimization\n# orf_search_mode: continuouscds | bestsharedsegment | referenceguided | referencecandidateorf\n# stop_codon_action: removesample | maskcodon | keep\n# genetic_code: standard | vertebratemitochondrial | invertebratemitochondrial\n# bestsharedsegment uses shared stop-free length plus an internal protein-profile coding score\n# referencecandidateorf tries a matched reference first, then candidate extraction\n# UCE and explicitly non-coding IDs remain skipped",
@@ -33,7 +33,7 @@ fn section_comment(key: &str) -> Option<&'static str> {
         "trim_external" => Some("# Ragged-edge trimming"),
         "trim_columns" => Some("# Column gap filter"),
         "enable_statistical_columns" => Some(
-            "# Statistical column trimming\n# stat_col_method: none | trimalsimilarity | gblocksblocks | entropy\n# stat_col_heuristic: custom | gappyout | strict | strictplus\n# stat_col_gap_treatment: none | half | all",
+            "# AlignmentForge statistical column heuristics\n# stat_col_method: none | trimalsimilarity | gblocksblocks | entropy\n# stat_col_heuristic: custom | gappyout | strict | strictplus\n# stat_col_gap_treatment: none | half | all\n# stat_col_max_nonconserved is retained for recipe compatibility but is not applied",
         ),
         "trim_coverage" => Some(
             "# Sample coverage filter\n# relative_width: sample | alignment",

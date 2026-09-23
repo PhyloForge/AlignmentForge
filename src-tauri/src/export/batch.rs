@@ -1,6 +1,6 @@
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::Path;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,15 @@ pub struct BatchExportResult {
     pub recipe_json_path: Option<String>,
     pub total_introns_exported: usize,
     pub intron_directory_path: Option<String>,
+    pub total_failed: usize,
+    pub errors: Vec<BatchExportError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchExportError {
+    pub input_path: String,
+    pub output_path: String,
+    pub error: String,
 }
 
 struct ExportRecord {
@@ -80,6 +89,32 @@ struct ExportRecord {
     old_gap_percent: f64,
     catalog_gap_percent: f64,
     intron_exported: bool,
+    errors: Vec<BatchExportError>,
+}
+
+fn write_alignment_atomic(
+    path: &Path,
+    taxa: &[String],
+    sequences: &[String],
+    format: AlignmentFormat,
+) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid output path: {}", path.display()))?;
+    let temporary_path = path.with_file_name(format!(".{file_name}.tmp"));
+    if let Err(error) = write_alignment(&temporary_path, taxa, sequences, format) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    fs::rename(&temporary_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary_path);
+        format!("Failed to finalize {}: {error}", path.display())
+    })
+}
+
+fn output_path(directory: &Path, alignment: &Alignment, format: AlignmentFormat) -> PathBuf {
+    directory.join(format!("{}.{}", alignment.id, format.extension()))
 }
 
 fn validate_directory_name<'a>(label: &str, name: &'a str) -> Result<&'a str, String> {
@@ -95,6 +130,7 @@ fn validate_directory_name<'a>(label: &str, name: &'a str) -> Result<&'a str, St
 pub fn execute_batch_export(
     config: &BatchExportConfig,
     recipe: &TrimmingRecipe,
+    resolved_dataset_taxa: Option<usize>,
 ) -> Result<BatchExportResult, String> {
     let general_directory_name = validate_directory_name(
         "General alignment folder name",
@@ -125,24 +161,65 @@ pub fn execute_batch_export(
     }
 
     let out_dir = Path::new(&config.output_directory);
+    if out_dir.exists() && !out_dir.is_dir() {
+        return Err(format!(
+            "Export destination is not a directory: {}",
+            out_dir.display()
+        ));
+    }
     if !out_dir.exists() {
         fs::create_dir_all(out_dir)
             .map_err(|e| format!("Failed to create output directory: {}", e))?;
     }
 
-    let raw_alignments: Vec<Alignment> = config
+    let parsed: Vec<(String, Result<Alignment, String>)> = config
         .input_paths
         .par_iter()
-        .filter_map(|input_path| parse_alignment(Path::new(input_path)).ok())
+        .map(|input_path| (input_path.clone(), parse_alignment(Path::new(input_path))))
         .collect();
-    let runtime_recipe = if recipe.excluded_taxa.is_empty() {
+    let mut errors = Vec::new();
+    let mut raw_alignments = Vec::new();
+    for (input_path, result) in parsed {
+        match result {
+            Ok(alignment) => raw_alignments.push(alignment),
+            Err(error) => errors.push(BatchExportError {
+                input_path,
+                output_path: String::new(),
+                error,
+            }),
+        }
+    }
+    let runtime_recipe = if resolved_dataset_taxa.is_none() {
         recipe_with_dataset_sample_filter(recipe, &raw_alignments)
     } else {
         recipe.clone()
     };
+    let total_dataset_taxa = resolved_dataset_taxa.unwrap_or_else(|| {
+        raw_alignments
+            .iter()
+            .flat_map(|alignment| alignment.taxa.iter())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    });
     let alignment_dir = out_dir.join(general_directory_name);
     let orf_dir = out_dir.join(orf_directory_name);
     let intron_dir = out_dir.join(intron_directory_name);
+
+    let mut destinations: HashMap<String, String> = HashMap::new();
+    for alignment in &raw_alignments {
+        for directory in [&alignment_dir, &orf_dir, &intron_dir] {
+            let destination = output_path(directory, alignment, config.output_format);
+            let key = destination.to_string_lossy().to_lowercase();
+            if let Some(previous) = destinations.insert(key, alignment.file_path.clone()) {
+                return Err(format!(
+                    "Inputs '{}' and '{}' resolve to the same output path: {}",
+                    previous,
+                    alignment.file_path,
+                    destination.display()
+                ));
+            }
+        }
+    }
     if config.export_general_alignments {
         fs::create_dir_all(&alignment_dir)
             .map_err(|e| format!("Failed to create general alignment output directory: {e}"))?;
@@ -163,46 +240,67 @@ pub fn execute_batch_export(
     let results: Vec<ExportRecord> = raw_alignments
         .par_iter()
         .map(|raw_align| {
-            let (catalog_alignment, catalog_diff) = apply_recipe(raw_align, &catalog_recipe, 0);
+            let mut record_errors = Vec::new();
+            let (catalog_alignment, catalog_diff) =
+                apply_recipe(raw_align, &catalog_recipe, total_dataset_taxa);
 
             let should_export_general = config.export_general_alignments
                 && (!config.only_passing || catalog_diff.pass)
                 && !catalog_alignment.sequences.is_empty()
                 && catalog_alignment.length > 0;
-            let general_exported = should_export_general
-                && write_alignment(
-                    alignment_dir.join(format!(
-                        "{}.{}",
-                        catalog_alignment.id,
-                        config.output_format.extension()
-                    )),
+            let general_path = output_path(&alignment_dir, &catalog_alignment, config.output_format);
+            let general_exported = if should_export_general {
+                match write_alignment_atomic(
+                    &general_path,
                     &catalog_alignment.taxa,
                     &catalog_alignment.sequences,
                     config.output_format,
-                )
-                .is_ok();
+                ) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        record_errors.push(BatchExportError {
+                            input_path: raw_align.file_path.clone(),
+                            output_path: general_path.to_string_lossy().to_string(),
+                            error,
+                        });
+                        false
+                    }
+                }
+            } else {
+                false
+            };
 
             let (orf_accepted, orf_exported, orf_taxa, orf_length) =
                 if config.export_orf_alignments && runtime_recipe.enable_orf {
-                    let (orf_alignment, orf_diff) = apply_recipe(raw_align, &runtime_recipe, 0);
+                    let (orf_alignment, orf_diff) =
+                        apply_recipe(raw_align, &runtime_recipe, total_dataset_taxa);
                     let accepted = orf_diff.orf_evaluated
                         && orf_diff.orf_candidate_found
                         && orf_diff.found_valid_orf
                         && !orf_alignment.sequences.is_empty()
                         && orf_alignment.num_taxa > 0
                         && orf_alignment.length > 0;
-                    let exported = accepted
-                        && write_alignment(
-                            orf_dir.join(format!(
-                                "{}.{}",
-                                orf_alignment.id,
-                                config.output_format.extension()
-                            )),
+                    let orf_path = output_path(&orf_dir, &orf_alignment, config.output_format);
+                    let exported = if accepted {
+                        match write_alignment_atomic(
+                            &orf_path,
                             &orf_alignment.taxa,
                             &orf_alignment.sequences,
                             config.output_format,
-                        )
-                        .is_ok();
+                        ) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                record_errors.push(BatchExportError {
+                                    input_path: raw_align.file_path.clone(),
+                                    output_path: orf_path.to_string_lossy().to_string(),
+                                    error,
+                                });
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     (
                         accepted,
                         exported,
@@ -226,23 +324,33 @@ pub fn execute_batch_export(
                             let mut intron_recipe = catalog_recipe.clone();
                             intron_recipe.orf_reference_sequences.clear();
                             let (filtered_intron, intron_diff) =
-                                apply_recipe(&intron_alignment, &intron_recipe, 0);
+                                apply_recipe(&intron_alignment, &intron_recipe, total_dataset_taxa);
                             let should_export_intron = !config.only_passing || intron_diff.pass;
                             if should_export_intron
                                 && !filtered_intron.sequences.is_empty()
                                 && filtered_intron.length > 0
                             {
-                                intron_exported = write_alignment(
-                                    intron_dir.join(format!(
-                                        "{}.{}",
-                                        filtered_intron.id,
-                                        config.output_format.extension()
-                                    )),
+                                let intron_path = output_path(
+                                    &intron_dir,
+                                    &filtered_intron,
+                                    config.output_format,
+                                );
+                                intron_exported = match write_alignment_atomic(
+                                    &intron_path,
                                     &filtered_intron.taxa,
                                     &filtered_intron.sequences,
                                     config.output_format,
-                                )
-                                .is_ok();
+                                ) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        record_errors.push(BatchExportError {
+                                            input_path: raw_align.file_path.clone(),
+                                            output_path: intron_path.to_string_lossy().to_string(),
+                                            error,
+                                        });
+                                        false
+                                    }
+                                };
                             }
                         }
                     }
@@ -264,47 +372,43 @@ pub fn execute_batch_export(
                 old_gap_percent: catalog_diff.old_gap_percent,
                 catalog_gap_percent: catalog_diff.new_gap_percent,
                 intron_exported,
+                errors: record_errors,
             }
         })
         .collect();
 
-    let total_processed = results.len();
+    let total_processed = config.input_paths.len();
     let total_exported = results.iter().filter(|result| result.general_exported).count();
     let total_discarded = results.iter().filter(|result| !result.catalog_pass).count();
     let total_orfs_exported = results.iter().filter(|result| result.orf_exported).count();
     let total_introns_exported = results.iter().filter(|result| result.intron_exported).count();
+    errors.extend(results.iter().flat_map(|result| result.errors.iter().cloned()));
 
     // Write summary CSV
     let summary_csv_path = if config.save_summary_csv {
         let csv_path = out_dir.join("alignment-trimming_summary.csv");
-        if let Ok(mut file) = File::create(&csv_path) {
-            let _ = writeln!(
-                file,
-                "Alignment,CatalogPass,GeneralExported,ORFAccepted,ORFExported,startSamples,catalogSamples,orfSamples,startLength,catalogLength,orfLength,startPerGaps,catalogPerGaps,intronExported"
-            );
+        {
+            let mut writer = csv::Writer::from_path(&csv_path)
+                .map_err(|error| format!("Failed to create export summary CSV: {error}"))?;
+            writer.write_record([
+                "Alignment", "CatalogPass", "GeneralExported", "ORFAccepted",
+                "ORFExported", "startSamples", "catalogSamples", "orfSamples",
+                "startLength", "catalogLength", "orfLength", "startPerGaps",
+                "catalogPerGaps", "intronExported",
+            ]).map_err(|error| format!("Failed to write export summary CSV: {error}"))?;
             for result in &results {
-                let _ = writeln!(
-                    file,
-                    "{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.2},{}",
-                    result.id,
-                    result.catalog_pass,
-                    result.general_exported,
-                    result.orf_accepted,
-                    result.orf_exported,
-                    result.old_taxa,
-                    result.catalog_taxa,
-                    result.orf_taxa,
-                    result.old_length,
-                    result.catalog_length,
-                    result.orf_length,
-                    result.old_gap_percent,
-                    result.catalog_gap_percent,
-                    result.intron_exported
-                );
+                writer.serialize((
+                    &result.id, result.catalog_pass, result.general_exported,
+                    result.orf_accepted, result.orf_exported, result.old_taxa,
+                    result.catalog_taxa, result.orf_taxa, result.old_length,
+                    result.catalog_length, result.orf_length,
+                    format!("{:.2}", result.old_gap_percent),
+                    format!("{:.2}", result.catalog_gap_percent), result.intron_exported,
+                )).map_err(|error| format!("Failed to write export summary CSV: {error}"))?;
             }
+            writer.flush()
+                .map_err(|error| format!("Failed to finish export summary CSV: {error}"))?;
             Some(csv_path.to_string_lossy().to_string())
-        } else {
-            None
         }
     } else {
         None
@@ -313,12 +417,11 @@ pub fn execute_batch_export(
     // Write recipe JSON
     let recipe_json_path = if config.save_recipe_json {
         let recipe_path = out_dir.join("recipe.json");
-        if let Ok(json_str) = serde_json::to_string_pretty(recipe) {
-            let _ = fs::write(&recipe_path, json_str);
-            Some(recipe_path.to_string_lossy().to_string())
-        } else {
-            None
-        }
+        let json = serde_json::to_string_pretty(&runtime_recipe)
+            .map_err(|error| format!("Failed to serialize export recipe: {error}"))?;
+        fs::write(&recipe_path, json)
+            .map_err(|error| format!("Failed to write export recipe: {error}"))?;
+        Some(recipe_path.to_string_lossy().to_string())
     } else {
         None
     };
@@ -338,6 +441,8 @@ pub fn execute_batch_export(
         total_introns_exported,
         intron_directory_path: (total_introns_exported > 0)
             .then(|| intron_dir.to_string_lossy().to_string()),
+        total_failed: errors.len(),
+        errors,
     })
 }
 
@@ -363,6 +468,67 @@ mod tests {
     }
 
     #[test]
+    fn reports_missing_inputs() {
+        let output = std::env::temp_dir().join("alignmentforge_missing_export_input");
+        let _ = fs::remove_dir_all(&output);
+        let config = BatchExportConfig {
+            input_paths: vec![output.join("missing.fa").to_string_lossy().to_string()],
+            output_directory: output.to_string_lossy().to_string(),
+            general_alignment_directory_name: "all_alignments".to_string(),
+            orf_alignment_directory_name: "orf_alignments".to_string(),
+            intron_directory_name: "intron_alignments".to_string(),
+            output_format: AlignmentFormat::Fasta,
+            only_passing: false,
+            export_general_alignments: true,
+            export_orf_alignments: false,
+            save_recipe_json: false,
+            save_summary_csv: false,
+            export_introns: false,
+        };
+
+        let result = execute_batch_export(&config, &TrimmingRecipe::default(), None).unwrap();
+        assert_eq!(result.total_exported, 0);
+        assert_eq!(result.total_failed, 1);
+        assert!(result.errors[0].error.contains("Failed to"));
+        let _ = fs::remove_dir_all(output);
+    }
+
+    #[test]
+    fn rejects_duplicate_output_names_before_writing() {
+        let root = std::env::temp_dir().join("alignmentforge_duplicate_export_names");
+        let _ = fs::remove_dir_all(&root);
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let first = first_dir.join("same.fa");
+        let second = second_dir.join("SAME.fa");
+        fs::write(&first, ">a\nAAAA\n").unwrap();
+        fs::write(&second, ">a\nCCCC\n").unwrap();
+        let config = BatchExportConfig {
+            input_paths: vec![
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string(),
+            ],
+            output_directory: root.join("output").to_string_lossy().to_string(),
+            general_alignment_directory_name: "all_alignments".to_string(),
+            orf_alignment_directory_name: "orf_alignments".to_string(),
+            intron_directory_name: "intron_alignments".to_string(),
+            output_format: AlignmentFormat::Fasta,
+            only_passing: false,
+            export_general_alignments: true,
+            export_orf_alignments: false,
+            save_recipe_json: false,
+            save_summary_csv: false,
+            export_introns: false,
+        };
+
+        let error = execute_batch_export(&config, &TrimmingRecipe::default(), None).unwrap_err();
+        assert!(error.contains("same output path"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_batch_export() {
         let temp_dir = std::env::temp_dir().join("test_batch_export_dir");
         let _ = fs::remove_dir_all(&temp_dir);
@@ -384,7 +550,7 @@ mod tests {
                 export_introns: false,
             };
             let recipe = TrimmingRecipe::default();
-            let res = execute_batch_export(&config, &recipe).unwrap();
+            let res = execute_batch_export(&config, &recipe, None).unwrap();
 
             assert_eq!(res.total_processed, 1);
             assert!(temp_dir.join("all_alignments/uce-1001.phy").exists());
@@ -434,7 +600,7 @@ mod tests {
             export_introns: true,
         };
 
-        let result = execute_batch_export(&config, &recipe).unwrap();
+        let result = execute_batch_export(&config, &recipe, None).unwrap();
         assert_eq!(result.total_introns_exported, 1);
         assert!(output_dir
             .join("custom_introns/exon_export_intron.fa")
@@ -493,7 +659,7 @@ mod tests {
             export_introns: false,
         };
 
-        let result = execute_batch_export(&config, &recipe).unwrap();
+        let result = execute_batch_export(&config, &recipe, None).unwrap();
         assert_eq!(result.total_exported, 1);
         assert_eq!(result.total_orfs_exported, 1);
 
@@ -512,7 +678,7 @@ mod tests {
         catalog_fail_config.output_directory =
             catalog_fail_output.to_string_lossy().to_string();
         let catalog_fail_result =
-            execute_batch_export(&catalog_fail_config, &catalog_fail_recipe).unwrap();
+            execute_batch_export(&catalog_fail_config, &catalog_fail_recipe, None).unwrap();
         assert_eq!(catalog_fail_result.total_exported, 0);
         assert_eq!(catalog_fail_result.total_discarded, 1);
         assert_eq!(catalog_fail_result.total_orfs_exported, 1);

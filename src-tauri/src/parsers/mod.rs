@@ -3,6 +3,7 @@ pub mod nexus;
 pub mod phylip;
 
 use std::path::Path;
+use std::collections::HashSet;
 use crate::models::{Alignment, AlignmentFormat};
 
 /// Rejects an alignment whose rows do not form a rectangular matrix.
@@ -24,11 +25,42 @@ pub fn validate_alignment_shape(
         ));
     }
 
+    let mut seen_taxa = HashSet::with_capacity(taxa.len());
+    for taxon in taxa {
+        if taxon.trim().is_empty() {
+            return Err(format!("{format_name} file contains an empty taxon name"));
+        }
+        if !seen_taxa.insert(taxon) {
+            return Err(format!(
+                "{format_name} file contains duplicate taxon name '{taxon}'"
+            ));
+        }
+    }
+
     let Some(first_length) = sequences.first().map(String::len) else {
         return Ok(());
     };
 
     for (taxon, sequence) in taxa.iter().zip(sequences.iter()) {
+        if sequence.is_empty() {
+            return Err(format!(
+                "{format_name} record '{taxon}' has an empty sequence"
+            ));
+        }
+        for (position, byte) in sequence.bytes().enumerate() {
+            let valid = matches!(
+                byte.to_ascii_uppercase(),
+                b'A' | b'C' | b'G' | b'T' | b'U' | b'N' | b'R' | b'Y' | b'S' | b'W'
+                    | b'K' | b'M' | b'B' | b'D' | b'H' | b'V' | b'X' | b'-' | b'?'
+                    | b'.' | b'!' | b'*'
+            );
+            if !byte.is_ascii() || !valid {
+                return Err(format!(
+                    "{format_name} record '{taxon}' contains unsupported sequence character at position {}",
+                    position + 1
+                ));
+            }
+        }
         if sequence.len() != first_length {
             return Err(format!(
                 "{format_name} alignment is not rectangular: '{taxon}' has {} sites but the first sequence has {first_length}",

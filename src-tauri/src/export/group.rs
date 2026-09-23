@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::Write;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 
@@ -32,32 +32,49 @@ pub struct GroupedConcatenateResult {
 pub fn concatenate_alignments_by_gene(
     config: &GroupedConcatenateConfig,
     recipe: &TrimmingRecipe,
+    resolved_dataset_taxa: Option<usize>,
 ) -> Result<GroupedConcatenateResult, String> {
     // 1. Parse the metadata file (CSV, TSV, or TXT)
-    let file = File::open(&config.gene_mapping_csv_path)
-        .map_err(|e| format!("Could not open gene mapping file: {}", e))?;
-    let reader = BufReader::new(file);
+    let delimiter = if Path::new(&config.gene_mapping_csv_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsv"))
+    {
+        b'\t'
+    } else {
+        b','
+    };
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter)
+        .from_path(&config.gene_mapping_csv_path)
+        .map_err(|e| format!("Could not open gene mapping file: {e}"))?;
 
     // exon_name -> gene_name
     let mut exon_to_gene: BTreeMap<String, String> = BTreeMap::new();
     
-    for line in reader.lines() {
-        let line = line.unwrap_or_default();
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    for record in reader.records() {
+        let record = record.map_err(|error| format!("Could not read gene mapping: {error}"))?;
+        if record.len() < 2 {
             continue;
         }
-
-        // Try to split by tab first, if no tab, try comma
-        let separator = if trimmed.contains('\t') { '\t' } else { ',' };
-        let parts: Vec<&str> = trimmed.split(separator).collect();
-        
-        if parts.len() >= 2 {
-            let exon = parts[0].trim().to_string();
-            let gene = parts[1].trim().to_string();
-            // Skip headers if they happen to be obvious, or just include them (they won't match a file)
-            exon_to_gene.insert(exon, gene);
+        let exon = record[0].trim().to_string();
+        let gene = record[1].trim().to_string();
+        if exon.is_empty() || gene.is_empty() {
+            continue;
         }
+        let gene_path = Path::new(&gene);
+        if gene == "."
+            || gene == ".."
+            || gene_path.components().count() != 1
+            || gene.contains('/')
+            || gene.contains('\\')
+        {
+            return Err(format!(
+                "Gene name '{gene}' must be a single filename component"
+            ));
+        }
+        exon_to_gene.insert(exon, gene);
     }
 
     if exon_to_gene.is_empty() {
@@ -86,28 +103,40 @@ pub fn concatenate_alignments_by_gene(
     let mut total_genes = 0;
     let mut total_exons_processed = 0;
 
+    let all_raw_alignments: Vec<Alignment> = config
+        .input_paths
+        .iter()
+        .map(|path| parse_alignment(Path::new(path)))
+        .collect::<Result<_, _>>()?;
+    let runtime_recipe = if resolved_dataset_taxa.is_none() {
+        recipe_with_dataset_sample_filter(recipe, &all_raw_alignments)
+    } else {
+        recipe.clone()
+    };
+    let total_dataset_taxa = resolved_dataset_taxa.unwrap_or_else(|| {
+        all_raw_alignments
+            .iter()
+            .flat_map(|alignment| alignment.taxa.iter())
+            .collect::<BTreeSet<_>>()
+            .len()
+    });
+
     // 3. Process each gene group
     for (gene, paths) in &gene_to_paths {
-        let raw_alignments: Vec<Alignment> = paths
+        let raw_alignments: Vec<&Alignment> = paths
             .iter()
-            .filter_map(|p| parse_alignment(Path::new(p)).ok())
+            .filter_map(|path| all_raw_alignments.iter().find(|alignment| &alignment.file_path == path))
             .collect();
             
         if raw_alignments.is_empty() {
             continue;
         }
 
-        let runtime_recipe = if recipe.excluded_taxa.is_empty() {
-            recipe_with_dataset_sample_filter(recipe, &raw_alignments)
-        } else {
-            recipe.clone()
-        };
-
         let mut passing_alignments = Vec::new();
         let mut all_taxa_set = BTreeSet::new();
 
         for raw in &raw_alignments {
-            let (transformed, diff) = apply_recipe(raw, &runtime_recipe, 0);
+            let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
             if (!config.only_passing || diff.pass) && transformed.length > 0 && !transformed.taxa.is_empty() {
                 for taxon in &transformed.taxa {
                     all_taxa_set.insert(taxon.clone());
@@ -165,35 +194,36 @@ pub fn concatenate_alignments_by_gene(
         let out_prefix_str = out_prefix.to_string_lossy();
         let supermatrix_path = format!("{}.{}", out_prefix_str, config.output_format.extension());
 
-        if let Err(e) = write_alignment(
+        write_alignment(
             &supermatrix_path,
             &final_taxa,
             &final_seqs,
             config.output_format,
-        ) {
-            eprintln!("Failed to write gene alignment {}: {}", gene, e);
-        }
+        )
+        .map_err(|error| format!("Failed to write gene alignment '{gene}': {error}"))?;
 
         if config.write_raxml_partitions {
             let raxml_path = format!("{}_partitions.txt", out_prefix_str);
-            if let Ok(mut file) = File::create(&raxml_path) {
-                use std::io::Write;
-                for part in &partitions {
-                    let _ = writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end);
-                }
+            let mut file = File::create(&raxml_path)
+                .map_err(|error| format!("Failed to create partition file for '{gene}': {error}"))?;
+            for part in &partitions {
+                writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
+                    .map_err(|error| format!("Failed to write partition file for '{gene}': {error}"))?;
             }
         }
 
         if config.write_nexus_partitions {
             let nex_path = format!("{}_partitions.nex", out_prefix_str);
-            if let Ok(mut file) = File::create(&nex_path) {
-                use std::io::Write;
-                let _ = writeln!(file, "#NEXUS\nBEGIN SETS;");
-                for part in &partitions {
-                    let _ = writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end);
-                }
-                let _ = writeln!(file, "END;");
+            let mut file = File::create(&nex_path)
+                .map_err(|error| format!("Failed to create NEXUS partition file for '{gene}': {error}"))?;
+            writeln!(file, "#NEXUS\nBEGIN SETS;")
+                .map_err(|error| format!("Failed to write NEXUS partition file for '{gene}': {error}"))?;
+            for part in &partitions {
+                writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
+                    .map_err(|error| format!("Failed to write NEXUS partition file for '{gene}': {error}"))?;
             }
+            writeln!(file, "END;")
+                .map_err(|error| format!("Failed to finish NEXUS partition file for '{gene}': {error}"))?;
         }
 
         total_genes += 1;
@@ -256,7 +286,7 @@ mod tests {
             let mut recipe = TrimmingRecipe::default();
             recipe.trim_coverage = false;
 
-            let res = concatenate_alignments_by_gene(&config, &recipe).unwrap();
+            let res = concatenate_alignments_by_gene(&config, &recipe, None).unwrap();
             
             assert_eq!(res.total_genes, 2);
             assert_eq!(res.total_exons_processed, 3);

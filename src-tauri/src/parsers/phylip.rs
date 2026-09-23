@@ -93,12 +93,11 @@ pub fn parse_phylip_str(
             sequences.push(seq);
         }
     } else {
-        // Sequential records spread over several lines, or interleaved blocks.
-        // Both layouts follow one rule: a line that carries only sequence
-        // continues the first record that has not reached the declared length.
-        // That fills records in order for sequential files and cycles through
-        // them for interleaved files, without inventing a taxon from bases.
-        let mut fallback_idx = 0;
+        // Before all declared taxa have been read, sequence-only lines continue
+        // the most recent sequential record. After the first block has defined
+        // every taxon, unnamed continuation rows advance in taxon order.
+        let mut continuation_row = 0;
+        let mut sequential_layout = false;
 
         for line in remaining_lines {
             let tokens: Vec<&str> = line.split_whitespace().collect();
@@ -111,19 +110,19 @@ pub fn parse_phylip_str(
                 && (!taxa.is_empty() || expected_length == 0);
 
             if continues_a_record {
-                let target = if expected_length > 0 {
-                    sequences.iter().position(|seq| seq.len() < expected_length)
+                let target = if taxa.len() < expected_taxa || sequential_layout {
+                    sequential_layout = true;
+                    sequences.len().checked_sub(1)
                 } else {
-                    None
+                    let target = continuation_row;
+                    continuation_row = (continuation_row + 1) % expected_taxa.max(1);
+                    Some(target)
                 };
-                let target = target.unwrap_or_else(|| {
-                    let idx = fallback_idx % sequences.len().max(1);
-                    fallback_idx += 1;
-                    idx
-                });
-                if let Some(sequence) = sequences.get_mut(target) {
-                    sequence.push_str(&sequence_chars(line));
-                    continue;
+                if let Some(target) = target {
+                    if let Some(sequence) = sequences.get_mut(target) {
+                        sequence.push_str(&sequence_chars(line));
+                        continue;
+                    }
                 }
             }
 
@@ -139,10 +138,9 @@ pub fn parse_phylip_str(
                 .first()
                 .and_then(|name| taxa.iter().position(|taxon| taxon == name));
             let target = named_target.unwrap_or_else(|| {
-                sequences
-                    .iter()
-                    .position(|seq| expected_length > 0 && seq.len() < expected_length)
-                    .unwrap_or(0)
+                let target = continuation_row;
+                continuation_row = (continuation_row + 1) % expected_taxa.max(1);
+                target
             });
             let seq_chunk = if named_target.is_some() {
                 tokens[1..].concat()
@@ -184,6 +182,11 @@ pub fn write_phylip<P: AsRef<Path>>(
     sequences: &[String],
     interleaved: bool,
 ) -> Result<(), String> {
+    if let Some(name) = taxa.iter().find(|name| name.chars().any(char::is_whitespace)) {
+        return Err(format!(
+            "PHYLIP taxon name '{name}' contains whitespace and cannot be written unambiguously"
+        ));
+    }
     let mut file = File::create(path).map_err(|e| format!("Failed to create PHYLIP: {}", e))?;
 
     let num_taxa = taxa.len();
@@ -255,6 +258,30 @@ mod tests {
         assert_eq!(parsed.num_taxa, 2);
 
         let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn parses_unnamed_interleaved_rows_in_taxon_order() {
+        let content = "2 12\na AAAA\nb CCCC\n\nGGGG\nTTTT\n\nACGT\nTGCA\n";
+        let parsed = parse_phylip_str(content, "id", "test.phy", "test.phy").unwrap();
+
+        assert_eq!(parsed.taxa, vec!["a", "b"]);
+        assert_eq!(parsed.sequences, vec!["AAAAGGGGACGT", "CCCCTTTTTGCA"]);
+    }
+
+    #[test]
+    fn parses_wrapped_sequential_records() {
+        let content = "2 8\na AAAA\nGGGG\nb CCCC\nTTTT\n";
+        let parsed = parse_phylip_str(content, "id", "test.phy", "test.phy").unwrap();
+
+        assert_eq!(parsed.sequences, vec!["AAAAGGGG", "CCCCTTTT"]);
+    }
+
+    #[test]
+    fn rejects_truncated_interleaved_block() {
+        let content = "2 12\na AAAA\nb CCCC\nGGGG\nTTTT\nACGT\n";
+        let error = parse_phylip_str(content, "id", "test.phy", "test.phy").unwrap_err();
+        assert!(error.contains("not rectangular") || error.contains("declares 12 sites"));
     }
 
     #[test]

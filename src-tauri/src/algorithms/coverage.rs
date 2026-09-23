@@ -18,14 +18,11 @@ pub fn filter_sample_coverage(
     min_coverage_percent: f64,
     relative_width: RelativeWidth,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
-    if sequences.len() <= 2 || sequences.is_empty() {
+    if sequences.is_empty() {
         return (taxa.to_vec(), sequences.to_vec(), Vec::new());
     }
 
     let alignment_len = sequences[0].len();
-    if min_coverage_bp >= alignment_len && alignment_len > 0 {
-        return (taxa.to_vec(), sequences.to_vec(), Vec::new());
-    }
 
     // Count non-gap bases per sequence
     let base_counts: Vec<usize> = sequences
@@ -33,7 +30,9 @@ pub fn filter_sample_coverage(
         .map(|s| {
             s.as_bytes()
                 .iter()
-                .filter(|&&b| b != b'-' && b != b'?' && b != b'N' && b != b'n')
+                .filter(|&&b| {
+                    b != b'-' && b != b'?' && b != b'N' && b != b'n' && b != b'!'
+                })
                 .count()
         })
         .collect();
@@ -135,5 +134,54 @@ mod tests {
         assert_eq!(kept_t, vec!["Taxon_Good".to_string()]);
         assert_eq!(dropped, vec!["Taxon_Short".to_string(), "Taxon_Empty".to_string()]);
         assert_eq!(kept_s.len(), 1);
+    }
+
+    #[test]
+    fn applies_absolute_threshold_at_and_above_alignment_width() {
+        let taxa = vec!["full".to_string(), "half".to_string(), "empty".to_string()];
+        let sequences = vec!["AAAA".to_string(), "AA--".to_string(), "----".to_string()];
+
+        let (kept, _, _) = filter_sample_coverage(
+            &taxa,
+            &sequences,
+            4,
+            0.0,
+            RelativeWidth::Alignment,
+        );
+        assert_eq!(kept, vec!["full"]);
+
+        let (kept, _, _) = filter_sample_coverage(
+            &taxa,
+            &sequences,
+            5,
+            0.0,
+            RelativeWidth::Alignment,
+        );
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn applies_coverage_to_one_and_two_samples() {
+        let one_taxon = vec!["empty".to_string()];
+        let one_sequence = vec!["----".to_string()];
+        let (kept, _, _) = filter_sample_coverage(
+            &one_taxon,
+            &one_sequence,
+            1,
+            0.0,
+            RelativeWidth::Sample,
+        );
+        assert!(kept.is_empty());
+
+        let taxa = vec!["full".to_string(), "empty".to_string()];
+        let sequences = vec!["AAAA".to_string(), "----".to_string()];
+        let (kept, _, _) = filter_sample_coverage(
+            &taxa,
+            &sequences,
+            3,
+            0.0,
+            RelativeWidth::Alignment,
+        );
+        assert_eq!(kept, vec!["full"]);
     }
 }

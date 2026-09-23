@@ -105,7 +105,7 @@ fn resolved_state(character: u8, exclude_ambiguities: bool) -> Option<u8> {
     match upper {
         b'A' | b'C' | b'G' | b'T' => Some(upper),
         b'U' => Some(b'T'),
-        b'-' | b'?' | b'N' => None,
+        b'-' | b'?' | b'N' | b'!' => None,
         ambiguity if exclude_ambiguities && is_iupac_ambiguity(ambiguity) => None,
         other if other < 128 => Some(other),
         _ => None,

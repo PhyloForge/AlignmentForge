@@ -5,7 +5,7 @@ import { TrimmingRecipe } from './types';
  *
  * This is the single definition used by the browser build. It must stay in step
  * with `TrimmingRecipe::default()` in `src-tauri/src/pipeline/recipe.rs`; the
- * `npm run parity` check fails when the two drift apart. The desktop build
+ * Rust preset tests and the TypeScript type check protect this shared contract. The desktop build
  * replaces this with the presets returned by the `get_presets` command.
  */
 export const DEFAULT_RECIPE: TrimmingRecipe = {

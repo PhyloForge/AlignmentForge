@@ -244,7 +244,7 @@ pub async fn run_batch_export(
     tokio::task::spawn_blocking(move || {
       guard_panics("Batch export", move || {
         let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
-        execute_batch_export(&config, &runtime_recipe)
+        execute_batch_export(&config, &runtime_recipe, Some(cache.unique_taxon_count()))
       })
     })
         .await
@@ -261,7 +261,7 @@ pub async fn run_concatenate(
     tokio::task::spawn_blocking(move || {
       guard_panics("Supermatrix assembly", move || {
         let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
-        concatenate_alignments(&config, &runtime_recipe)
+        concatenate_alignments(&config, &runtime_recipe, Some(cache.unique_taxon_count()))
       })
     })
         .await
@@ -278,7 +278,7 @@ pub async fn run_grouped_concatenate(
     tokio::task::spawn_blocking(move || {
       guard_panics("Gene concatenation", move || {
         let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
-        concatenate_alignments_by_gene(&config, &runtime_recipe)
+        concatenate_alignments_by_gene(&config, &runtime_recipe, Some(cache.unique_taxon_count()))
       })
     })
         .await

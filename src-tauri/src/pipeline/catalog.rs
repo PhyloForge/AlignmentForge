@@ -400,7 +400,14 @@ pub fn fast_index_alignment(
             recipe.min_variable_percent,
         )
     } else {
-        (true, Vec::new())
+        let mut reasons = Vec::new();
+        if num_taxa == 0 {
+            reasons.push("0 surviving taxa (all samples pruned)".to_string());
+        }
+        if length == 0 {
+            reasons.push("0 surviving columns (all alignment sites removed)".to_string());
+        }
+        (reasons.is_empty(), reasons)
     };
 
     let summary = AlignmentSummary {
@@ -498,6 +505,12 @@ pub fn apply_assessment(
             fail_reasons.push(reason);
         }
     }
+    if summary.length == 0 {
+        let reason = "0 surviving columns (all alignment sites removed)".to_string();
+        if !fail_reasons.contains(&reason) {
+            fail_reasons.push(reason);
+        }
+    }
 
     if recipe.assess_alignment {
         let (_, assess_reasons) = assess_alignment(
@@ -530,7 +543,10 @@ pub fn apply_assessment(
     }
 
     summary.pass =
-        unassessed.pipeline_pass && fail_reasons.is_empty() && summary.num_taxa > 0;
+        unassessed.pipeline_pass
+            && fail_reasons.is_empty()
+            && summary.num_taxa > 0
+            && summary.length > 0;
     summary.fail_reasons = fail_reasons;
     summary
 }

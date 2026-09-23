@@ -99,6 +99,9 @@ pub fn parse_fasta_bytes(
             header_for_error = header_str.clone();
             current_header = Some(header_str);
         } else {
+            if current_header.is_none() {
+                return Err("FASTA sequence data appears before the first header".to_string());
+            }
             // Filter out internal whitespace and append directly
             for &b in trimmed {
                 if b != b' ' && b != b'\t' {
@@ -176,6 +179,29 @@ mod tests {
         assert_eq!(parsed.num_taxa, 2);
 
         let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn rejects_sequence_before_header() {
+        let error = parse_fasta_bytes(b"AAAA\n>sample\nAAAA\n", "id", "test.fa", "test.fa")
+            .unwrap_err();
+        assert!(error.contains("before the first header"));
+    }
+
+    #[test]
+    fn rejects_duplicate_names_and_unsupported_sequence_characters() {
+        let duplicate = parse_fasta_bytes(
+            b">same\nAAAA\n>same\nCCCC\n",
+            "id",
+            "test.fa",
+            "test.fa",
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate taxon name 'same'"));
+
+        let protein = parse_fasta_bytes(b">sample\nAEFG\n", "id", "test.faa", "test.faa")
+            .unwrap_err();
+        assert!(protein.contains("position 2"));
     }
 
     #[test]

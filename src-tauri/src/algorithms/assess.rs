@@ -46,11 +46,15 @@ pub fn assess_alignment(
         }
     }
 
-    if min_length > 0 && length < min_length {
+    if length == 0 {
+        fail_reasons.push("0 surviving columns (all alignment sites removed)".to_string());
+    } else if min_length > 0 && length < min_length {
         fail_reasons.push(format!("Length ({} bp < min {} bp)", length, min_length));
     }
 
-    if max_gap_percent > 0.0 && gap_percent > max_gap_percent {
+    // Zero is a strict threshold: only an alignment with no missing data passes.
+    // A value of 100 permits any possible gap percentage.
+    if gap_percent > max_gap_percent {
         fail_reasons.push(format!(
             "Gap percentage ({:.1}% > max {:.1}%)",
             gap_percent, max_gap_percent

@@ -24,6 +24,7 @@ class EngineWorker {
   private readonly worker: Worker;
   private readonly pending = new Map<number, Pending>();
   private nextRequestId = 1;
+  private failed = false;
   /** File paths this worker holds, so a view request reaches the right shard. */
   readonly filePaths = new Set<string>();
   /** Reports partial completion of an in-flight request. */
@@ -47,12 +48,17 @@ class EngineWorker {
     };
     this.worker.onerror = (event) => {
       const failure = new Error(event.message || 'Engine worker failed');
+      this.failed = true;
       for (const entry of this.pending.values()) entry.reject(failure);
       this.pending.clear();
+      this.worker.terminate();
     };
   }
 
   send<T>(request: Record<string, unknown>): Promise<T> {
+    if (this.failed) {
+      return Promise.reject(new Error('Engine worker is unavailable; reload the dataset'));
+    }
     const requestId = this.nextRequestId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
@@ -61,6 +67,9 @@ class EngineWorker {
   }
 
   terminate() {
+    const cancellation = new Error('Engine request cancelled because the worker was terminated');
+    for (const entry of this.pending.values()) entry.reject(cancellation);
+    this.failed = true;
     this.worker.terminate();
     this.pending.clear();
   }

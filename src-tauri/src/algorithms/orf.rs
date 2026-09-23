@@ -917,6 +917,15 @@ pub fn optimize_open_reading_frames_guided(
     if is_reverse && !config.auto_flip_reverse {
         found_valid_orf = false;
     }
+    let continuous_mode = matches!(
+        config.search_mode,
+        OrfSearchMode::ContinuousCds | OrfSearchMode::ReferenceGuided
+    );
+    if continuous_mode && trim_start > 0 && !config.auto_shift_frame {
+        // Keep the reported candidate, but do not validate a different set of
+        // triplets when the required frame shift is disabled.
+        found_valid_orf = false;
+    }
 
     // 2. Flip alignment if on reverse strand
     if is_reverse && config.auto_flip_reverse && found_valid_orf {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -75,6 +76,14 @@ impl AlignmentCache {
     pub fn taxon_presence(&self) -> TaxonPresence {
         let map = self.lock();
         map.values().map(|align| align.taxa.clone()).collect()
+    }
+
+    pub fn unique_taxon_count(&self) -> usize {
+        let map = self.lock();
+        map.values()
+            .flat_map(|alignment| alignment.taxa.iter())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// Number of cached alignments.

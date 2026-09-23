@@ -22,7 +22,7 @@ pub struct TrimmingRecipe {
     pub trim_similarity: bool,
     pub similarity_threshold: f64,
 
-    // Step 3a: Profile HMM Segment Cleaner (TAPIR-Style)
+    // Step 3a: AlignmentForge profile-confidence segment heuristic.
     #[serde(default)]
     pub trim_hmm: bool,
     #[serde(default = "default_hmm_posterior")]
@@ -92,7 +92,7 @@ pub struct TrimmingRecipe {
     pub min_column_gap_percent: f64,
     pub count_n_as_gap: bool,
 
-    // Step 6b: Statistical Column Trimming (trimAl & Gblocks)
+    // Step 6b: AlignmentForge similarity, conserved-block, and entropy heuristics.
     #[serde(default)]
     pub enable_statistical_columns: bool,
     #[serde(default)]
@@ -106,6 +106,8 @@ pub struct TrimmingRecipe {
     #[serde(default = "default_min_block_len")]
     pub stat_col_min_block_length: usize,
     #[serde(default = "default_max_nonconserved")]
+    /// Retained for saved-recipe compatibility. The current conserved-block
+    /// heuristic does not bridge nonconserved runs with this value.
     pub stat_col_max_nonconserved: usize,
     #[serde(default)]
     pub stat_col_gap_treatment: StatColGapTreatment,

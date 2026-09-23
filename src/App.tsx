@@ -122,6 +122,7 @@ export const App: React.FC = () => {
   const [retentionSummaries, setRetentionSummaries] = useState<AlignmentSummary[] | null>(null);
   const [showParseFailures, setShowParseFailures] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   const [recipes, setRecipes] = useState<TrimmingRecipe[]>([]);
   const [activeRecipe, setActiveRecipe] = useState<TrimmingRecipe>(DEFAULT_RECIPE);
@@ -423,6 +424,7 @@ export const App: React.FC = () => {
     const totalUniqueTaxa = overview.total_unique_taxa || occupancy.length || 0;
     setIsCatalogProcessing(true);
     setCatalogProcessingPercent(0);
+    setCatalogError(null);
 
     const timer = window.setTimeout(() => {
       recalculateCatalog(paths, activeRecipeRef.current, totalUniqueTaxa, (progress) => {
@@ -436,10 +438,12 @@ export const App: React.FC = () => {
           rawSummariesRef.current = res.summaries;
           setSummaries(res.summaries);
           setOverview(res.overview);
+          setCatalogError(null);
         })
         .catch((err) => {
           if (catalogRequestIdRef.current === requestId) {
             console.error('Failed to recalculate catalog:', err);
+            setCatalogError(err instanceof Error ? err.message : String(err));
           }
         })
         .finally(() => {
@@ -736,6 +740,25 @@ export const App: React.FC = () => {
           </div>
           <button
             onClick={() => setLoadError(null)}
+            className="shrink-0 text-rose-300 hover:text-rose-100 transition-colors"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {catalogError && (
+        <div className="shrink-0 bg-rose-500/10 border-b border-rose-500/30 px-4 py-2 text-xs text-rose-200 flex items-start gap-2">
+          <XCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+          <div className="flex-1 min-w-0">
+            <div className="font-semibold text-rose-300">Catalog calculation failed</div>
+            <div className="text-rose-200/80 break-words">
+              The displayed results use the last successful settings. {catalogError}
+            </div>
+          </div>
+          <button
+            onClick={() => setCatalogError(null)}
             className="shrink-0 text-rose-300 hover:text-rose-100 transition-colors"
             aria-label="Dismiss"
           >

@@ -17,7 +17,7 @@ use crate::algorithms::segments::mask_divergent_segments;
 use crate::algorithms::similarity::filter_sample_similarity;
 use crate::algorithms::statistical_columns::trim_statistical_columns;
 use crate::algorithms::stats::calculate_gap_stats;
-use crate::models::{Alignment, StopCodonPos, TrimmingDiff};
+use crate::models::{Alignment, MaskedSegment, StopCodonPos, TrimmingDiff};
 use crate::pipeline::recipe::TrimmingRecipe;
 
 fn detect_stop_codons(
@@ -68,6 +68,41 @@ fn map_final_stops_to_raw(
             })
         })
         .collect()
+}
+
+fn map_masked_segments_to_raw(
+    segments: Vec<MaskedSegment>,
+    raw_col_map: &[usize],
+) -> Vec<MaskedSegment> {
+    let mut mapped_segments = Vec::new();
+    for segment in segments {
+        let Some(columns) = raw_col_map.get(segment.start..segment.end) else {
+            continue;
+        };
+        let mut run_start = None;
+        let mut previous = None;
+        for &raw_column in columns {
+            if previous.is_some_and(|value| raw_column != value + 1) {
+                mapped_segments.push(MaskedSegment {
+                    taxon: segment.taxon.clone(),
+                    start: run_start.unwrap_or(raw_column),
+                    end: previous.unwrap_or(raw_column) + 1,
+                });
+                run_start = Some(raw_column);
+            } else if run_start.is_none() {
+                run_start = Some(raw_column);
+            }
+            previous = Some(raw_column);
+        }
+        if let (Some(start), Some(end)) = (run_start, previous) {
+            mapped_segments.push(MaskedSegment {
+                taxon: segment.taxon,
+                start,
+                end: end + 1,
+            });
+        }
+    }
+    mapped_segments
 }
 
 fn detect_raw_stops_in_selected_frame(
@@ -220,7 +255,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     // Step 2: Sample-level filtering. Remove samples before any column-level
     // operation so excluded sequences cannot influence gap, edge, or
     // statistical-column decisions.
-    if recipe.trim_coverage && current_seqs.len() > 2 {
+    if recipe.trim_coverage {
         let (cov_taxa, cov_seqs, dropped) = filter_sample_coverage(
             &current_taxa,
             &current_seqs,
@@ -362,7 +397,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             recipe.hmm_min_segment_length,
             recipe.hmm_min_island_length,
         );
-        all_masked_segments.extend(segments);
+        all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
         current_seqs = hmm_seqs;
     }
 
@@ -374,7 +409,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             recipe.segment_window_size,
             recipe.segment_threshold,
         );
-        all_masked_segments.extend(segments);
+        all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
         current_seqs = masked_seqs;
     }
 
@@ -468,7 +503,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
                     recipe.hmm_min_segment_length,
                     recipe.hmm_min_island_length,
                 );
-                all_masked_segments.extend(segments);
+                all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
                 current_seqs = hmm_seqs;
             }
             if recipe.trim_segments && current_seqs.len() > 2 {
@@ -478,8 +513,31 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
                     recipe.segment_window_size,
                     recipe.segment_threshold,
                 );
-                all_masked_segments.extend(segments);
+                all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
                 current_seqs = masked_seqs;
+            }
+            if recipe.remove_gap_only_columns && !current_seqs.is_empty() {
+                let (cleaned_seqs, dropped_columns) = remove_gap_only_columns(&current_seqs);
+                if !dropped_columns.is_empty() {
+                    let dropped_set: HashSet<usize> =
+                        dropped_columns.iter().copied().collect();
+                    for local_column in &dropped_columns {
+                        if let Some(raw_column) = raw_col_map.get(*local_column) {
+                            column_reasons.insert(
+                                *raw_column,
+                                "Column masked completely by sequence trimming".to_string(),
+                            );
+                        }
+                    }
+                    raw_col_map = raw_col_map
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, raw_column)| {
+                            (!dropped_set.contains(&index)).then_some(raw_column)
+                        })
+                        .collect();
+                    current_seqs = cleaned_seqs;
+                }
             }
 
             selected_region_raw_map = raw_col_map.clone();
@@ -668,6 +726,10 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     let mut all_trimmed_columns: Vec<usize> = (0..old_length).filter(|c| !kept_set.contains(c)).collect();
     all_trimmed_columns.sort();
 
+    // MACSE markers must remain available through codon QC. After QC, they are
+    // missing data and all final statistics must use that same output matrix.
+    crate::algorithms::codon_qc::convert_macse_to_n(&mut current_seqs);
+
     let new_taxa_count = current_taxa.len();
     let new_length = current_seqs.first().map_or(0, |s| s.len());
 
@@ -686,6 +748,9 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
 
     if new_taxa_count == 0 {
         fail_reasons.push("0 surviving taxa (all samples pruned)".to_string());
+    }
+    if new_length == 0 {
+        fail_reasons.push("0 surviving columns (all alignment sites removed)".to_string());
     }
 
     if is_coding_with_orf {
@@ -756,9 +821,6 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     }
 
     let pass = fail_reasons.is_empty();
-
-    // Final Sanitization: Convert surviving MACSE frameshifts to standard missing data
-    crate::algorithms::codon_qc::convert_macse_to_n(&mut current_seqs);
 
     let transformed_alignment = Alignment::new(
         alignment.id.clone(),
@@ -845,6 +907,7 @@ mod tests {
 
         let mut recipe = TrimmingRecipe::default();
         recipe.min_length = 10;
+        recipe.trim_coverage = false;
         let (transformed, diff) = apply_recipe(&align, &recipe, 0);
 
         assert_eq!(transformed.length, 12);

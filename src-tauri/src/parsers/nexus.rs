@@ -5,6 +5,106 @@ use std::path::Path;
 use crate::models::{Alignment, AlignmentFormat};
 use crate::parsers::validate_alignment_shape;
 
+fn remove_comments(content: &str) -> Result<String, String> {
+    let mut cleaned = String::with_capacity(content.len());
+    let mut comment_depth = 0usize;
+    let mut quote = None;
+
+    for character in content.chars() {
+        if comment_depth > 0 {
+            match character {
+                '[' => comment_depth += 1,
+                ']' => comment_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            cleaned.push(character);
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                cleaned.push(character);
+            }
+            '[' => comment_depth = 1,
+            _ => cleaned.push(character),
+        }
+    }
+
+    if comment_depth > 0 {
+        return Err("NEXUS file contains an unterminated comment".to_string());
+    }
+    Ok(cleaned)
+}
+
+fn metadata_value(metadata: &str, key: &str) -> Option<String> {
+    let upper = metadata.to_ascii_uppercase();
+    let start = upper.find(key)? + key.len();
+    let bytes = metadata.as_bytes();
+    let mut index = start;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'=') {
+        return None;
+    }
+    index += 1;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let end = metadata[index..]
+        .find(|character: char| character.is_whitespace() || character == ';')
+        .map(|offset| index + offset)
+        .unwrap_or(metadata.len());
+    Some(metadata[index..end].trim_matches(['\'', '"']).to_string())
+}
+
+fn split_matrix_row(line: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut characters = line.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if character.is_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            continue;
+        }
+        if character == '\'' || character == '"' {
+            let delimiter = character;
+            let mut closed = false;
+            while let Some(quoted) = characters.next() {
+                if quoted == delimiter {
+                    if characters.peek() == Some(&delimiter) {
+                        token.push(quoted);
+                        characters.next();
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    token.push(quoted);
+                }
+            }
+            if !closed {
+                return Err("NEXUS matrix contains an unterminated quoted taxon name".to_string());
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
+
 pub fn parse_nexus<P: AsRef<Path>>(path: P) -> Result<Alignment, String> {
     let path_ref = path.as_ref();
     let content = fs::read_to_string(path_ref)
@@ -28,52 +128,114 @@ pub fn parse_nexus_str(
     file_path: &str,
 ) -> Result<Alignment, String> {
 
-    let mut in_matrix = false;
+    let cleaned = remove_comments(content)?;
+    let upper = cleaned.to_ascii_uppercase();
+    let matrix_start = upper
+        .find("MATRIX")
+        .ok_or_else(|| "No matrix data found in NEXUS file".to_string())?;
+    let metadata = &cleaned[..matrix_start];
+    let declared_taxa = metadata_value(metadata, "NTAX")
+        .map(|value| value.parse::<usize>().map_err(|_| "Invalid NEXUS NTAX value".to_string()))
+        .transpose()?;
+    let declared_length = metadata_value(metadata, "NCHAR")
+        .map(|value| value.parse::<usize>().map_err(|_| "Invalid NEXUS NCHAR value".to_string()))
+        .transpose()?;
+    let datatype = metadata_value(metadata, "DATATYPE").unwrap_or_else(|| "DNA".to_string());
+    if !matches!(datatype.to_ascii_uppercase().as_str(), "DNA" | "RNA" | "NUCLEOTIDE") {
+        return Err(format!("Unsupported NEXUS DATATYPE={datatype}; only nucleotide data is supported"));
+    }
+    let gap = metadata_value(metadata, "GAP").and_then(|value| value.chars().next()).unwrap_or('-');
+    let missing = metadata_value(metadata, "MISSING").and_then(|value| value.chars().next()).unwrap_or('?');
+    let match_character = metadata_value(metadata, "MATCHCHAR").and_then(|value| value.chars().next());
+
     let mut taxa: Vec<String> = Vec::new();
     let mut sequences: Vec<String> = Vec::new();
     let mut taxon_index_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut continuation_row = 0usize;
+    let mut terminated = false;
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('[') {
+    for line in cleaned[matrix_start + "MATRIX".len()..].lines() {
+        let mut trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-
-        let upper = trimmed.to_ascii_uppercase();
-
-        if upper.starts_with("MATRIX") {
-            in_matrix = true;
-            continue;
+        if let Some(position) = trimmed.find(';') {
+            trimmed = trimmed[..position].trim();
+            terminated = true;
         }
-
-        if in_matrix {
-            if trimmed == ";" || upper.starts_with("END;") || upper == "END" {
-                break;
-            }
-
-            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            if tokens.len() >= 2 {
-                let name = tokens[0].trim_matches('\'').trim_matches('"').to_string();
-                let seq = tokens[1..].concat();
-
-                if let Some(&idx) = taxon_index_map.get(&name) {
-                    sequences[idx].push_str(&seq);
+        if !trimmed.is_empty() {
+            let tokens = split_matrix_row(trimmed)?;
+            if tokens.len() == 1 && !taxa.is_empty() {
+                sequences[continuation_row].push_str(&tokens[0]);
+                continuation_row = (continuation_row + 1) % taxa.len();
+            } else if tokens.len() >= 2 {
+                let name = tokens[0].clone();
+                let sequence = tokens[1..].concat();
+                if let Some(&index) = taxon_index_map.get(&name) {
+                    sequences[index].push_str(&sequence);
                 } else {
-                    let idx = taxa.len();
-                    taxon_index_map.insert(name.clone(), idx);
+                    let index = taxa.len();
+                    taxon_index_map.insert(name.clone(), index);
                     taxa.push(name);
-                    sequences.push(seq);
+                    sequences.push(sequence);
                 }
+            } else {
+                return Err("Invalid empty row in NEXUS matrix".to_string());
             }
+        }
+        if terminated {
+            break;
         }
     }
 
     if taxa.is_empty() {
         return Err("No matrix data found in NEXUS file".to_string());
     }
+    if !terminated {
+        return Err("NEXUS matrix is missing its terminating semicolon".to_string());
+    }
+    if let Some(expected) = declared_taxa {
+        if taxa.len() != expected {
+            return Err(format!(
+                "NEXUS declares {expected} taxa but {} were read",
+                taxa.len()
+            ));
+        }
+    }
 
-    validate_alignment_shape(&taxa, &sequences, None, "NEXUS")?;
+    for sequence in &mut sequences {
+        *sequence = sequence
+            .chars()
+            .map(|character| {
+                if character == gap {
+                    '-'
+                } else if character == missing {
+                    '?'
+                } else {
+                    character
+                }
+            })
+            .collect();
+    }
+    if let Some(match_character) = match_character {
+        let reference = sequences[0].clone();
+        for (row, sequence) in sequences.iter_mut().enumerate().skip(1) {
+            let mut resolved = String::with_capacity(sequence.len());
+            for (column, character) in sequence.chars().enumerate() {
+                if character == match_character {
+                    let reference_character = reference.chars().nth(column).ok_or_else(|| {
+                        format!("NEXUS match character in row {} exceeds the first sequence", row + 1)
+                    })?;
+                    resolved.push(reference_character);
+                } else {
+                    resolved.push(character);
+                }
+            }
+            *sequence = resolved;
+        }
+    }
+
+    validate_alignment_shape(&taxa, &sequences, declared_length, "NEXUS")?;
 
     Ok(Alignment::new(
         id.to_string(),
@@ -112,11 +274,15 @@ pub fn write_nexus<P: AsRef<Path>>(
     .map_err(|e| e.to_string())?;
     writeln!(file, "  MATRIX").map_err(|e| e.to_string())?;
 
-    let max_name_len = taxa.iter().map(|t| t.len()).max().unwrap_or(10);
+    let quoted_taxa: Vec<String> = taxa
+        .iter()
+        .map(|name| format!("'{}'", name.replace('\'', "''")))
+        .collect();
+    let max_name_len = quoted_taxa.iter().map(|t| t.len()).max().unwrap_or(10);
     let pad = (max_name_len + 4).max(12);
 
     if !interleaved {
-        for (name, seq) in taxa.iter().zip(sequences.iter()) {
+        for (name, seq) in quoted_taxa.iter().zip(sequences.iter()) {
             writeln!(file, "    {:<pad$} {}", name, seq, pad = pad).map_err(|e| e.to_string())?;
         }
     } else {
@@ -127,7 +293,7 @@ pub fn write_nexus<P: AsRef<Path>>(
             let start = chunk_idx * chunk_size;
             let end = (start + chunk_size).min(length);
 
-            for (name, seq) in taxa.iter().zip(sequences.iter()) {
+            for (name, seq) in quoted_taxa.iter().zip(sequences.iter()) {
                 let seq_chunk = if start < seq.len() {
                     let chunk_end = end.min(seq.len());
                     &seq[start..chunk_end]
@@ -170,5 +336,24 @@ mod tests {
         assert_eq!(parsed.num_taxa, 2);
 
         let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn reads_metadata_match_characters_and_quoted_names() {
+        let content = "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=2 NCHAR=4;\nFORMAT DATATYPE=DNA GAP=~ MISSING=X MATCHCHAR=.;\nMATRIX\n'first sample' AT~X\n'second ''sample''' ....;\nEND;\n";
+        let parsed = parse_nexus_str(content, "id", "test.nex", "test.nex").unwrap();
+
+        assert_eq!(parsed.taxa, vec!["first sample", "second 'sample'"]);
+        assert_eq!(parsed.sequences, vec!["AT-?", "AT-?"]);
+    }
+
+    #[test]
+    fn rejects_declared_dimension_mismatch_and_missing_terminator() {
+        let mismatch = "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=1 NCHAR=40;\nMATRIX\na ATGC;\nEND;";
+        assert!(parse_nexus_str(mismatch, "id", "test.nex", "test.nex").is_err());
+
+        let unterminated = "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=1 NCHAR=4;\nMATRIX\na ATGC\nEND";
+        let error = parse_nexus_str(unterminated, "id", "test.nex", "test.nex").unwrap_err();
+        assert!(error.contains("terminating semicolon"));
     }
 }

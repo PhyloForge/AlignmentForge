@@ -583,7 +583,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           )}
         </div>
 
-        {/* Display 5: Profile HMM Segment Cleaner (TAPIR-Style) */}
+        {/* Display 5: AlignmentForge profile-confidence cleaner */}
         <div
           className="shrink-0 border border-pink-500/30 rounded-lg bg-pink-500/[0.035] overflow-hidden"
           style={{ order: 5 }}
@@ -594,7 +594,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           >
             <div className="flex items-center gap-2">
               <span className="w-5 h-5 rounded flex items-center justify-center text-pink-400"><Activity className="w-3.5 h-3.5" /></span>
-              <span className="font-semibold text-pink-300">Profile HMM Cleaner</span>
+              <span className="font-semibold text-pink-300">Profile-Confidence Cleaner</span>
             </div>
             {collapsedSections['hmm'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -606,7 +606,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           {!collapsedSections['hmm'] && (
             <div className="p-3 space-y-3">
               <label className="flex items-center justify-between cursor-pointer">
-                <span className="text-[#c9d1d9]">Profile HMM Posterior Masking</span>
+                <span className="text-[#c9d1d9]">Profile-Confidence Masking</span>
                 <input
                   type="checkbox"
                   checked={recipe.trim_hmm ?? false}
@@ -1152,7 +1152,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       className="w-full bg-[#1b2029] border border-[#2d3545] rounded px-2 py-1 text-xs text-[#c9d1d9] outline-none"
                     >
                       <option value="trimalsimilarity">trimAl Similarity & Consistency</option>
-                      <option value="gblocksblocks">Gblocks Conserved Blocks</option>
+                      <option value="gblocksblocks">AlignmentForge Conserved Blocks</option>
                       <option value="entropy">Shannon Information Entropy</option>
                     </select>
                   </div>
@@ -1169,7 +1169,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                           className="w-full bg-[#1b2029] border border-[#2d3545] rounded px-2 py-1 text-xs text-[#c9d1d9] outline-none"
                         >
                           <option value="custom">Custom Similarity Cutoff</option>
-                          <option value="gappyout">trimAl Gappyout (Gap Elbow)</option>
+                          <option value="gappyout">AlignmentForge Similarity and Gap Heuristic</option>
                           <option value="strict">trimAl Strict</option>
                           <option value="strictplus">trimAl StrictPlus (High Conservation)</option>
                         </select>

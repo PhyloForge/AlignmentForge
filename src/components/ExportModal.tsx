@@ -244,6 +244,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <div className="font-mono text-xs text-[#8b949e] bg-[#0e1014] p-3 rounded border border-[#232833] text-left space-y-1">
                   <div>General alignments exported: <b className="text-emerald-400">{batchResult.total_exported}</b></div>
                   <div>Catalog QC failures: <b className="text-rose-400">{batchResult.total_discarded}</b></div>
+                  {batchResult.total_failed > 0 && (
+                    <div>File errors: <b className="text-rose-400">{batchResult.total_failed}</b></div>
+                  )}
                   {(batchResult.total_orfs_exported ?? 0) > 0 && (
                     <div>Accepted ORF alignments exported: <b className="text-violet-300">{batchResult.total_orfs_exported}</b></div>
                   )}
@@ -264,6 +267,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                       📄 Summary CSV: {batchResult.summary_csv_path}
                     </div>
                   )}
+                  {batchResult.errors.map((failure, index) => (
+                    <div key={`${failure.input_path}-${index}`} className="text-[11px] text-rose-300 pt-1 break-all">
+                      {failure.input_path}: {failure.error}
+                      {failure.output_path ? ` (output: ${failure.output_path})` : ''}
+                    </div>
+                  ))}
                 </div>
               )}
               {concatResult && (
@@ -511,7 +520,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                         className="rounded bg-[#1f242e] border-[#2d3545] text-blue-500"
                       />
                       <span className="text-[#c9d1d9]">
-                        Save reproducible recipe (<code>recipe.json</code>)
+                        Save filter recipe (<code>recipe.json</code>)
                       </span>
                     </label>
                   </>

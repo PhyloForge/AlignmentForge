@@ -11,7 +11,7 @@ pub fn calculate_gap_stats(sequences: &[String]) -> (usize, usize, f64) {
         for &b in seq.as_bytes() {
             total_chars += 1;
             match b {
-                b'-' | b'?' | b'N' | b'n' => gap_count += 1,
+                b'-' | b'?' | b'N' | b'n' | b'!' => gap_count += 1,
                 _ => {}
             }
         }
@@ -59,17 +59,13 @@ pub fn compute_majority_consensus(sequences: &[String], remove_gaps: bool) -> St
     }
     let length = sequences[0].len();
     let mut consensus = Vec::with_capacity(length);
-    let mut char_counts = [0u16; 128];
-
-    // For very large alignments (>50 taxa), sample up to 50 representative sequences for fast consensus
-    let step = if sequences.len() > 50 { sequences.len() / 50 } else { 1 };
+    let mut char_counts = [0usize; 128];
 
     for col in 0..length {
         char_counts.fill(0);
         let mut total_informative = 0usize;
 
-        for i in (0..sequences.len()).step_by(step) {
-            let seq = &sequences[i];
+        for seq in sequences {
             if let Some(&b) = seq.as_bytes().get(col) {
                 let upper = (b as char).to_ascii_uppercase() as usize;
                 if upper < 128 && upper != b'-' as usize && upper != b'?' as usize && upper != b'N' as usize {
@@ -86,7 +82,7 @@ pub fn compute_majority_consensus(sequences: &[String], remove_gaps: bool) -> St
         } else {
             // Find most frequent character
             let mut max_char = b'-';
-            let mut max_cnt = 0u16;
+            let mut max_cnt = 0usize;
             for (idx, &cnt) in char_counts.iter().enumerate() {
                 if cnt > max_cnt {
                     max_cnt = cnt;
@@ -181,6 +177,22 @@ mod tests {
         assert_eq!(gap_count, 8);
         assert_eq!(total_chars, 24);
         assert!((gap_pct - 33.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn consensus_uses_every_sequence() {
+        let mut sequences = Vec::new();
+        for index in 0..100 {
+            if index < 80 && index % 2 == 0 {
+                sequences.push("CCCC".to_string());
+            } else {
+                sequences.push("AAAA".to_string());
+            }
+        }
+
+        assert_eq!(compute_majority_consensus(&sequences, false), "AAAA");
+        sequences.reverse();
+        assert_eq!(compute_majority_consensus(&sequences, false), "AAAA");
     }
 
     #[test]

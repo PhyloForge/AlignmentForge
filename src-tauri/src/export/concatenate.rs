@@ -41,6 +41,7 @@ pub struct LocusPartition {
 pub fn concatenate_alignments(
     config: &ConcatenateConfig,
     recipe: &TrimmingRecipe,
+    resolved_dataset_taxa: Option<usize>,
 ) -> Result<ConcatenateResult, String> {
     let mut passing_alignments = Vec::new();
     let mut all_taxa_set = BTreeSet::new();
@@ -48,16 +49,26 @@ pub fn concatenate_alignments(
     let raw_alignments: Vec<Alignment> = config
         .input_paths
         .iter()
-        .filter_map(|path| parse_alignment(Path::new(path)).ok())
-        .collect();
-    let runtime_recipe = if recipe.excluded_taxa.is_empty() {
+        .map(|path| {
+            parse_alignment(Path::new(path))
+                .map_err(|error| format!("Failed to read input '{path}': {error}"))
+        })
+        .collect::<Result<_, _>>()?;
+    let runtime_recipe = if resolved_dataset_taxa.is_none() {
         recipe_with_dataset_sample_filter(recipe, &raw_alignments)
     } else {
         recipe.clone()
     };
+    let total_dataset_taxa = resolved_dataset_taxa.unwrap_or_else(|| {
+        raw_alignments
+            .iter()
+            .flat_map(|alignment| alignment.taxa.iter())
+            .collect::<BTreeSet<_>>()
+            .len()
+    });
 
     for raw in &raw_alignments {
-        let (transformed, diff) = apply_recipe(raw, &runtime_recipe, 0);
+        let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
         if (!config.only_passing || diff.pass) && transformed.length > 0 && !transformed.taxa.is_empty() {
             for taxon in &transformed.taxa {
                 all_taxa_set.insert(taxon.clone());
@@ -129,14 +140,13 @@ pub fn concatenate_alignments(
     // Write RAxML partition file
     let raxml_partition_path = if config.write_raxml_partitions {
         let raxml_path = format!("{}_partitions.txt", out_prefix);
-        if let Ok(mut file) = File::create(&raxml_path) {
-            for part in &partitions {
-                let _ = writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end);
-            }
-            Some(raxml_path)
-        } else {
-            None
+        let mut file = File::create(&raxml_path)
+            .map_err(|error| format!("Failed to create RAxML partition file: {error}"))?;
+        for part in &partitions {
+            writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
+                .map_err(|error| format!("Failed to write RAxML partition file: {error}"))?;
         }
+        Some(raxml_path)
     } else {
         None
     };
@@ -144,16 +154,17 @@ pub fn concatenate_alignments(
     // Write NEXUS / IQ-TREE partition file
     let nexus_partition_path = if config.write_nexus_partitions {
         let nex_path = format!("{}_partitions.nex", out_prefix);
-        if let Ok(mut file) = File::create(&nex_path) {
-            let _ = writeln!(file, "#NEXUS\nBEGIN SETS;");
-            for part in &partitions {
-                let _ = writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end);
-            }
-            let _ = writeln!(file, "END;");
-            Some(nex_path)
-        } else {
-            None
+        let mut file = File::create(&nex_path)
+            .map_err(|error| format!("Failed to create NEXUS partition file: {error}"))?;
+        writeln!(file, "#NEXUS\nBEGIN SETS;")
+            .map_err(|error| format!("Failed to write NEXUS partition file: {error}"))?;
+        for part in &partitions {
+            writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
+                .map_err(|error| format!("Failed to write NEXUS partition file: {error}"))?;
         }
+        writeln!(file, "END;")
+            .map_err(|error| format!("Failed to finish NEXUS partition file: {error}"))?;
+        Some(nex_path)
     } else {
         None
     };
@@ -194,7 +205,7 @@ mod tests {
             // This test exercises concatenation, not sample-filter ordering.
             let mut recipe = TrimmingRecipe::default();
             recipe.trim_coverage = false;
-            let res = concatenate_alignments(&config, &recipe).unwrap();
+            let res = concatenate_alignments(&config, &recipe, None).unwrap();
 
             assert_eq!(res.total_loci, 2);
             assert_eq!(res.total_taxa, 4);
