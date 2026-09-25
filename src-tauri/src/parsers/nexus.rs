@@ -271,12 +271,12 @@ pub fn parse_nexus_str(
             .collect();
     }
     if let Some(match_character) = match_character {
-        let reference = sequences[0].clone();
+        let reference: Vec<char> = sequences[0].chars().collect();
         for (row, sequence) in sequences.iter_mut().enumerate().skip(1) {
             let mut resolved = String::with_capacity(sequence.len());
             for (column, character) in sequence.chars().enumerate() {
                 if character == match_character {
-                    let reference_character = reference.chars().nth(column).ok_or_else(|| {
+                    let reference_character = reference.get(column).copied().ok_or_else(|| {
                         format!("NEXUS match character in row {} exceeds the first sequence", row + 1)
                     })?;
                     resolved.push(reference_character);

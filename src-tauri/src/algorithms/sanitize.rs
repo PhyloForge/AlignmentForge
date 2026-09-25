@@ -9,24 +9,14 @@ pub enum AmbiguityStrategy {
     FixedStandard, // R->A, Y->T, S->G, W->A, K->T, M->A, B->T, D->T, H->T, V->A
 }
 
-pub fn replace_character(sequences: &[String], find: char, replace: char) -> Vec<String> {
-    let find_upper = find.to_ascii_uppercase();
-    let find_lower = find.to_ascii_lowercase();
-
-    sequences
-        .iter()
-        .map(|s| {
-            s.chars()
-                .map(|c| {
-                    if c == find_upper || c == find_lower {
-                        replace
-                    } else {
-                        c
-                    }
-                })
-                .collect()
-        })
-        .collect()
+/// Replaces the missing-data states N, n, and ? with a gap.
+pub fn replace_missing_with_gap(sequences: &mut [String]) {
+    const MISSING: [char; 3] = ['N', 'n', '?'];
+    for sequence in sequences {
+        if sequence.contains(MISSING) {
+            *sequence = sequence.replace(MISSING, "-");
+        }
+    }
 }
 
 /// Removes alignment columns where every sample contains only a gap or an
@@ -218,10 +208,14 @@ mod tests {
 
     #[test]
     fn test_replace_n() {
-        let seqs = vec!["ATGN-NATG".to_string(), "nnnnNNNN".to_string()];
-        let res = replace_character(&seqs, 'N', '-');
-        assert_eq!(res[0], "ATG---ATG");
-        assert_eq!(res[1], "--------");
+        let mut seqs = vec![
+            "ATGN-NATG".to_string(),
+            "nnnnNNNN".to_string(),
+            "AC?GT".to_string(),
+            "ACGT".to_string(),
+        ];
+        replace_missing_with_gap(&mut seqs);
+        assert_eq!(seqs, vec!["ATG---ATG", "--------", "AC-GT", "ACGT"]);
     }
 
     #[test]

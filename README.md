@@ -165,8 +165,9 @@ The trimming engine is written once, in Rust, under `src-tauri/src`. The desktop
 application links it directly. The browser runs the same code compiled to
 WebAssembly, spread across Web Workers so the loci are processed in parallel and
 the interface never blocks. The two builds therefore cannot disagree.
-`npm run check:parity` checks this. It runs both builds on the example data and
-compares each locus summary. Run `npm run build:wasm` before it.
+`npm run check:parity` checks this. It runs both builds on the example data. It
+compares the summary and the viewer data of each locus. Run `npm run build:wasm`
+before it.
 
 `npm run build:wasm` compiles the engine for the browser. `npm run dev` and
 `npm run build` do this for you, so you need the `wasm32-unknown-unknown` Rust

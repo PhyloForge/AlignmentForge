@@ -12,7 +12,6 @@ interface OrfAnalysisSidebarProps {
   recipe: TrimmingRecipe;
   onChangeRecipe: (recipe: TrimmingRecipe) => void;
   onResetRecipe: () => void;
-  onReferencesChanged: () => void;
   aminoAcidViewerSettings: AminoAcidViewerSettings;
   onChangeAminoAcidViewerSettings: (settings: AminoAcidViewerSettings) => void;
 }
@@ -29,7 +28,6 @@ export function OrfAnalysisSidebar({
   recipe,
   onChangeRecipe,
   onResetRecipe,
-  onReferencesChanged,
   aminoAcidViewerSettings,
   onChangeAminoAcidViewerSettings
 }: OrfAnalysisSidebarProps) {
@@ -81,7 +79,6 @@ export function OrfAnalysisSidebar({
         orf_reference_sequences: newRefs,
         orf_use_references: true
       });
-      onReferencesChanged();
     } catch (err) {
       console.error('Failed to parse references', err);
     }
@@ -215,7 +212,6 @@ export function OrfAnalysisSidebar({
                           orf_reference_sequences: {},
                           orf_search_mode: (recipe.orf_search_mode === 'referencecandidateorf' || recipe.orf_search_mode === 'referenceguided') ? 'continuouscds' as OrfSearchMode : recipe.orf_search_mode
                         });
-                        onReferencesChanged();
                       }}
                       className="inline-flex items-center justify-center gap-1.5 rounded border border-rose-500/25 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-300 disabled:opacity-35"
                     >

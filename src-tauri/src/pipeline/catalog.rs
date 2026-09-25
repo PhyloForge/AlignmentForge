@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
@@ -11,7 +12,6 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::algorithms::assess::assess_alignment;
-use crate::algorithms::informative::calculate_site_statistics;
 use crate::algorithms::orf::should_skip_orf_locus;
 use crate::algorithms::stats::{calculate_gap_stats, calculate_gc_percent, compute_mean_divergence};
 use crate::models::{Alignment, AlignmentSummary, DatasetOverview};
@@ -24,14 +24,14 @@ use crate::pipeline::recipe::TrimmingRecipe;
 
 /// Builds the runtime recipe for a dataset-wide sample occupancy threshold.
 /// A taxon below the threshold is excluded from every processed alignment.
-pub fn recipe_with_dataset_sample_filter(
+pub fn recipe_with_dataset_sample_filter<A: Borrow<Alignment>>(
     recipe: &TrimmingRecipe,
-    alignments: &[Alignment],
+    alignments: &[A],
 ) -> TrimmingRecipe {
     // Borrow the taxon lists rather than copying the alignments.
     let presence: Vec<&[String]> = alignments
         .iter()
-        .map(|alignment| alignment.taxa.as_slice())
+        .map(|alignment| alignment.borrow().taxa.as_slice())
         .collect();
     recipe_with_taxon_presence(recipe, &presence)
 }
@@ -82,7 +82,29 @@ pub fn recipe_without_orf_analysis(recipe: &TrimmingRecipe) -> TrimmingRecipe {
     let mut catalog_recipe = recipe.clone();
     catalog_recipe.enable_orf = false;
     catalog_recipe.orf_use_references = false;
+    // Nothing reads the references without ORF analysis. Dropping them keeps
+    // later copies of this recipe small.
+    catalog_recipe.orf_reference_sequences = HashMap::new();
     catalog_recipe
+}
+
+/// The two recipes that measure each locus: the ordinary branch and the ORF
+/// branch. A run builds them once, because a recipe can hold thousands of
+/// reference sequences.
+pub struct CatalogRecipes {
+    catalog: TrimmingRecipe,
+    orf: TrimmingRecipe,
+}
+
+impl CatalogRecipes {
+    pub fn new(recipe: &TrimmingRecipe) -> Self {
+        // Gating is applied later, so both branches run with it switched off and
+        // record only the failures that processing itself produced.
+        let mut orf = recipe.clone();
+        orf.assess_alignment = false;
+        let catalog = recipe_without_orf_analysis(&orf);
+        Self { catalog, orf }
+    }
 }
 
 /// How many directory levels below the chosen folder are searched. The browser
@@ -105,16 +127,10 @@ pub struct ParseFailure {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type ScanOutcome = (
-    Vec<AlignmentSummary>,
-    DatasetOverview,
-    Vec<TaxonOccupancy>,
-    Vec<Alignment>,
-    Vec<ParseFailure>,
-);
+pub type ScanOutcome = (Vec<Alignment>, Vec<TaxonOccupancy>, Vec<ParseFailure>);
 
-/// Scans a directory of alignments in parallel and returns summaries for all
-/// files in a single pass, plus the files that could not be parsed.
+/// Reads a directory of alignments in parallel. Returns the alignments, the
+/// dataset-wide sample occupancy, and the files that could not be parsed.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn scan_alignment_directory<P: AsRef<Path>, F>(
     dir: P,
@@ -170,20 +186,15 @@ where
         cb(0, total_files, "Starting index...");
     }
 
-    let default_recipe = TrimmingRecipe::default();
     let counter = Arc::new(AtomicUsize::new(0));
     let progress_ref = progress_callback.map(Arc::new);
 
-    // Single-pass ultra-fast parallel extraction: returns (Summary, Vec<(Taxon, non_gap_bp, gap_pct)>, Alignment)
-    type IndexedAlignment = (AlignmentSummary, Vec<(String, usize, f64)>, Alignment);
+    type IndexedAlignment = (Vec<(String, usize, f64)>, Alignment);
     let processed: Vec<Result<IndexedAlignment, ParseFailure>> = file_paths
         .par_iter()
         .map(|path| {
             let parsed = match parse_alignment(path) {
-                Ok(align) => {
-                    let (summary, taxa_info) = fast_index_alignment(&align, &default_recipe, 0);
-                    Ok((summary, taxa_info, align))
-                }
+                Ok(align) => Ok((sample_coverage(&align), align)),
                 Err(error) => Err(ParseFailure {
                     file_name: path
                         .file_name()
@@ -234,12 +245,10 @@ where
 
     let processed = succeeded;
     let total_loci = processed.len();
-    let mut summaries = Vec::with_capacity(total_loci);
     let mut alignments = Vec::with_capacity(total_loci);
     let mut taxa_stats_map: HashMap<String, (usize, usize, f64)> = HashMap::new();
 
-    for (summary, taxa_info, align) in processed {
-        summaries.push(summary);
+    for (taxa_info, align) in processed {
         alignments.push(align);
         for (taxon, bp, gap_pct) in taxa_info {
             let entry = taxa_stats_map.entry(taxon).or_insert((0, 0, 0.0));
@@ -248,40 +257,6 @@ where
             entry.2 += gap_pct;
         }
     }
-
-    let total_unique_taxa = taxa_stats_map.len();
-
-    // Re-evaluate quality & occupancy gating with known total dataset taxa
-    if total_unique_taxa > 0
-        && default_recipe.assess_alignment
-        && default_recipe.min_taxa_occupancy_percent > 0.0
-    {
-        for summary in &mut summaries {
-            let (pass, fail_reasons) = assess_alignment(
-                summary.num_taxa,
-                total_unique_taxa,
-                summary.length,
-                summary.gap_percent,
-                default_recipe.min_taxa,
-                default_recipe.min_taxa_occupancy_percent,
-                default_recipe.min_length,
-                default_recipe.max_gap_percent,
-                summary.pis_count,
-                summary.pis_percent,
-                default_recipe.min_pis_count,
-                default_recipe.min_pis_percent,
-                summary.variable_count,
-                summary.variable_percent,
-                default_recipe.min_variable_count,
-                default_recipe.min_variable_percent,
-            );
-            summary.pass = pass;
-            summary.fail_reasons = fail_reasons;
-        }
-    }
-
-    let mut overview = compute_dataset_overview(&summaries);
-    overview.total_unique_taxa = total_unique_taxa;
 
     let mut occupancy: Vec<TaxonOccupancy> = taxa_stats_map
         .into_iter()
@@ -296,173 +271,28 @@ where
 
     occupancy.sort_by(|a, b| b.present_loci_count.cmp(&a.present_loci_count));
 
-    Ok((summaries, overview, occupancy, alignments, parse_failures))
+    Ok((alignments, occupancy, parse_failures))
 }
 
-/// Ultra-fast single-pass alignment metadata extractor for directory indexing.
-/// Processes raw sequences in a single linear pass over byte slices without extra memory allocations.
-pub fn fast_index_alignment(
-    align: &Alignment,
-    recipe: &TrimmingRecipe,
-    total_dataset_taxa: usize,
-) -> (AlignmentSummary, Vec<(String, usize, f64)>) {
-    let num_taxa = align.num_taxa;
-    let length = align.length;
-
-    let mut total_bp = 0usize;
-    let mut gap_count = 0usize;
-    let mut gc_count = 0usize;
-    let mut total_valid_bases = 0usize;
-
-    let mut taxa_stats = Vec::with_capacity(num_taxa);
-
-    for (taxon, seq) in align.taxa.iter().zip(align.sequences.iter()) {
-        let seq_len = seq.len();
-        let mut sample_gaps = 0usize;
-
-        // `total_bp` counts observed bases. It always excludes `-`, `?`, and `N`
-        // so it matches `count_observed_bases`, which the post-trimming summary
-        // uses. `count_n_as_gap` only decides whether an N is reported as a gap.
-        // GC percent is measured over unambiguous A/C/G/T so a run of ambiguity
-        // codes cannot shift it.
-        for &b in seq.as_bytes() {
-            match b {
-                b'-' | b'?' => {
-                    sample_gaps += 1;
-                    gap_count += 1;
-                }
-                b'N' | b'n' => {
-                    if recipe.count_n_as_gap {
-                        gap_count += 1;
-                    }
-                    sample_gaps += 1;
-                }
-                b'G' | b'g' | b'C' | b'c' => {
-                    gc_count += 1;
-                    total_valid_bases += 1;
-                    total_bp += 1;
-                }
-                b'A' | b'a' | b'T' | b't' | b'U' | b'u' => {
-                    total_valid_bases += 1;
-                    total_bp += 1;
-                }
-                _ => {
-                    // Ambiguity codes are observed data but have no defined GC
-                    // contribution, so they count toward bp and not toward GC.
-                    total_bp += 1;
-                }
-            }
-        }
-
-        let non_gap_bp = seq_len.saturating_sub(sample_gaps);
-        let sample_gap_pct = if seq_len > 0 {
-            (sample_gaps as f64 / seq_len as f64) * 100.0
-        } else {
-            100.0
-        };
-        taxa_stats.push((taxon.clone(), non_gap_bp, sample_gap_pct));
-    }
-
-    let total_matrix_cells = num_taxa * length;
-    let gap_percent = if total_matrix_cells > 0 {
-        (gap_count as f64 / total_matrix_cells as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let gc_percent = if total_valid_bases > 0 {
-        (gc_count as f64 / total_valid_bases as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let site_stats = calculate_site_statistics(&align.sequences, true);
-    let variable_count = site_stats.variable_count;
-    let variable_percent = site_stats.variable_percent;
-    let pis_count = site_stats.pis_count;
-    let pis_percent = site_stats.pis_percent;
-
-    let mean_divergence = compute_mean_divergence(&align.sequences);
-
-    let (pass, fail_reasons) = if recipe.assess_alignment {
-        assess_alignment(
-            num_taxa,
-            total_dataset_taxa,
-            length,
-            gap_percent,
-            recipe.min_taxa,
-            recipe.min_taxa_occupancy_percent,
-            recipe.min_length,
-            recipe.max_gap_percent,
-            pis_count,
-            pis_percent,
-            recipe.min_pis_count,
-            recipe.min_pis_percent,
-            variable_count,
-            variable_percent,
-            recipe.min_variable_count,
-            recipe.min_variable_percent,
-        )
-    } else {
-        let mut reasons = Vec::new();
-        if num_taxa == 0 {
-            reasons.push("0 surviving taxa (all samples pruned)".to_string());
-        }
-        if length == 0 {
-            reasons.push("0 surviving columns (all alignment sites removed)".to_string());
-        }
-        (reasons.is_empty(), reasons)
-    };
-
-    let summary = AlignmentSummary {
-        id: align.id.clone(),
-        file_name: align.file_name.clone(),
-        file_path: align.file_path.clone(),
-        format: align.format,
-        num_taxa,
-        length,
-        total_basepairs: total_bp,
-        gap_count,
-        gap_percent,
-        variable_count,
-        variable_percent,
-        pis_count,
-        pis_percent,
-        mean_divergence,
-        gc_percent,
-        pass,
-        fail_reasons,
-        orf_valid: true,
-        orf_evaluated: false,
-        orf_candidate_found: false,
-        orf_frame: None,
-        orf_start: None,
-        orf_end: None,
-        orf_support_count: 0,
-        orf_support_percent: 0.0,
-        orf_retained_samples: 0,
-        orf_candidate_length_aa: 0,
-        orf_coding_score: 0.0,
-        orf_amino_acid_conservation: 0.0,
-        orf_frame_contrast: 0.0,
-        orf_reference_evaluated: false,
-        orf_reference_matched: false,
-        orf_reference_identity: 0.0,
-        orf_reference_coverage: 0.0,
-        orf_intron_length: 0,
-        raw_num_taxa: num_taxa,
-        raw_length: length,
-        raw_gap_percent: gap_percent,
-        retained_taxa: align.taxa.clone(),
-        retained_taxon_basepairs: taxa_stats
-            .iter()
-            .map(|(taxon, basepairs, _)| (taxon.clone(), *basepairs))
-            .collect(),
-        orf_retained_taxa: Vec::new(),
-        orf_retained_taxon_basepairs: HashMap::new(),
-    };
-
-    (summary, taxa_stats)
+/// Base pairs and missing-data percent of each sample in an unprocessed
+/// alignment. `-`, `?`, and `N` count as missing data.
+#[cfg(not(target_arch = "wasm32"))]
+fn sample_coverage(align: &Alignment) -> Vec<(String, usize, f64)> {
+    align
+        .taxa
+        .iter()
+        .zip(align.sequences.iter())
+        .map(|(taxon, sequence)| {
+            let basepairs = count_observed_bases(sequence);
+            let missing = sequence.len() - basepairs;
+            let missing_percent = if sequence.is_empty() {
+                100.0
+            } else {
+                (missing as f64 / sequence.len() as f64) * 100.0
+            };
+            (taxon.clone(), basepairs, missing_percent)
+        })
+        .collect()
 }
 
 /// Counts observed bases in a sequence. `-`, `?`, and `N` are missing data and
@@ -490,11 +320,26 @@ fn taxon_basepair_map(taxa: &[String], sequences: &[String]) -> HashMap<String, 
 #[derive(Debug, Clone)]
 pub struct UnassessedSummary {
     /// `fail_reasons` holds pipeline failures only, not threshold failures.
+    /// The per-sample lists are empty; `retention` holds them.
     pub summary: AlignmentSummary,
+    pub retention: SampleRetention,
     pub pipeline_pass: bool,
 }
 
-/// Applies the pass and fail thresholds to an already measured locus.
+/// The samples that a processed locus keeps, with their base pairs. Only the QC
+/// occupancy chart and the Matrix view read these lists, so the summaries sent
+/// on each recipe change leave them out.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SampleRetention {
+    pub file_path: String,
+    pub retained_taxa: Vec<String>,
+    pub retained_taxon_basepairs: HashMap<String, usize>,
+    pub orf_retained_taxa: Vec<String>,
+    pub orf_retained_taxon_basepairs: HashMap<String, usize>,
+}
+
+/// Applies the pass and fail thresholds to an already measured locus. The
+/// summary leaves out the per-sample lists.
 pub fn apply_assessment(
     unassessed: &UnassessedSummary,
     recipe: &TrimmingRecipe,
@@ -555,19 +400,22 @@ pub fn apply_assessment(
     summary
 }
 
-pub fn summarize_alignment(
-    alignment: &Alignment,
-    recipe: &TrimmingRecipe,
-    total_dataset_taxa: usize,
+/// Adds the per-sample lists to a summary.
+pub fn with_retention(
+    mut summary: AlignmentSummary,
+    retention: SampleRetention,
 ) -> AlignmentSummary {
-    let unassessed = summarize_alignment_unassessed(alignment, recipe, total_dataset_taxa);
-    apply_assessment(&unassessed, recipe, total_dataset_taxa)
+    summary.retained_taxa = retention.retained_taxa;
+    summary.retained_taxon_basepairs = retention.retained_taxon_basepairs;
+    summary.orf_retained_taxa = retention.orf_retained_taxa;
+    summary.orf_retained_taxon_basepairs = retention.orf_retained_taxon_basepairs;
+    summary
 }
 
 /// Runs the pipeline and measures the locus, without applying the thresholds.
 pub fn summarize_alignment_unassessed(
     alignment: &Alignment,
-    recipe: &TrimmingRecipe,
+    recipes: &CatalogRecipes,
     total_dataset_taxa: usize,
 ) -> UnassessedSummary {
     let raw_length = alignment.length;
@@ -576,24 +424,20 @@ pub fn summarize_alignment_unassessed(
     // Catalog QC and ORF analysis are parallel outcomes. Catalog metrics come
     // from the ordinary alignment branch; ORF metadata comes from its own
     // branch and cannot change Catalog pass/fail or its filter measurements.
-    // Gating is applied later, so the pipeline runs with it switched off and
-    // records only the failures that processing itself produced.
-    let mut processing_recipe = recipe.clone();
-    processing_recipe.assess_alignment = false;
-    let recipe = &processing_recipe;
-
-    let catalog_recipe = recipe_without_orf_analysis(recipe);
-    let (trimmed, diff) = apply_recipe(alignment, &catalog_recipe, total_dataset_taxa);
+    let (trimmed, diff) = apply_recipe(alignment, &recipes.catalog, total_dataset_taxa);
 
     // The ORF branch only differs when ORF analysis actually runs on this locus.
     // A locus that ORF skips, such as an excluded UCE, would repeat the whole
     // pipeline for an identical result.
-    let orf_branch_differs = recipe.enable_orf
-        && !(recipe.exclude_uce && should_skip_orf_locus(&alignment.id, recipe.orf_search_mode));
-    let (orf_alignment, orf_diff) = if orf_branch_differs {
-        apply_recipe(alignment, recipe, total_dataset_taxa)
-    } else {
-        (trimmed.clone(), diff.clone())
+    let orf_recipe = &recipes.orf;
+    let orf_branch_differs = orf_recipe.enable_orf
+        && !(orf_recipe.exclude_uce
+            && should_skip_orf_locus(&alignment.id, orf_recipe.orf_search_mode));
+    let orf_run =
+        orf_branch_differs.then(|| apply_recipe(alignment, orf_recipe, total_dataset_taxa));
+    let (orf_alignment, orf_diff) = match &orf_run {
+        Some((orf_alignment, orf_diff)) => (orf_alignment, orf_diff),
+        None => (&trimmed, &diff),
     };
 
     let (gap_count, _, _) = calculate_gap_stats(&trimmed.sequences);
@@ -661,6 +505,13 @@ pub fn summarize_alignment_unassessed(
         raw_num_taxa,
         raw_length,
         raw_gap_percent: diff.old_gap_percent,
+        retained_taxa: Vec::new(),
+        retained_taxon_basepairs: HashMap::new(),
+        orf_retained_taxa: Vec::new(),
+        orf_retained_taxon_basepairs: HashMap::new(),
+    };
+    let retention = SampleRetention {
+        file_path: alignment.file_path.clone(),
         retained_taxa: trimmed.taxa.clone(),
         retained_taxon_basepairs: taxon_basepair_map(&trimmed.taxa, &trimmed.sequences),
         orf_retained_taxa: orf_alignment.taxa.clone(),
@@ -672,6 +523,7 @@ pub fn summarize_alignment_unassessed(
 
     UnassessedSummary {
         summary,
+        retention,
         pipeline_pass,
     }
 }
@@ -714,7 +566,68 @@ pub fn compute_dataset_overview(summaries: &[AlignmentSummary]) -> DatasetOvervi
     }
 }
 
-/// Evaluates a recipe across cached alignments and reports completed loci as workers finish.
+/// Measures every locus in parallel, without applying the thresholds, and
+/// reports each completed locus. Returns `None` when `should_cancel` stops the
+/// run.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn measure_alignments<A, F, C>(
+    alignments: &[A],
+    recipe: &TrimmingRecipe,
+    total_unique_taxa: usize,
+    progress_callback: Option<F>,
+    should_cancel: C,
+) -> Option<Vec<UnassessedSummary>>
+where
+    A: Borrow<Alignment> + Sync,
+    F: Fn(usize, usize, &str) + Send + Sync,
+    C: Fn() -> bool + Send + Sync,
+{
+    let total = alignments.len();
+    let completed = AtomicUsize::new(0);
+    let runtime_recipe = recipe_with_dataset_sample_filter(recipe, alignments);
+    let recipes = CatalogRecipes::new(&runtime_recipe);
+    let measured: Vec<UnassessedSummary> = alignments
+        .par_iter()
+        .filter_map(|alignment| {
+            let alignment = alignment.borrow();
+            if should_cancel() {
+                return None;
+            }
+            let unassessed = summarize_alignment_unassessed(alignment, &recipes, total_unique_taxa);
+            if should_cancel() {
+                return None;
+            }
+            let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(ref callback) = progress_callback {
+                callback(current, total, &alignment.file_name);
+            }
+            Some(unassessed)
+        })
+        .collect();
+
+    if should_cancel() {
+        return None;
+    }
+    Some(measured)
+}
+
+/// Applies the thresholds to measured loci. The summaries leave out the
+/// per-sample lists.
+pub fn assess_measured(
+    measured: &[UnassessedSummary],
+    recipe: &TrimmingRecipe,
+    total_unique_taxa: usize,
+) -> (Vec<AlignmentSummary>, DatasetOverview) {
+    let summaries: Vec<AlignmentSummary> = measured
+        .iter()
+        .map(|locus| apply_assessment(locus, recipe, total_unique_taxa))
+        .collect();
+    let overview = compute_dataset_overview(&summaries);
+    (summaries, overview)
+}
+
+/// Evaluates a recipe across alignments. The summaries include the per-sample
+/// lists.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_alignments_with_progress<F>(
     alignments: &[Alignment],
@@ -725,80 +638,17 @@ pub fn evaluate_recipe_on_alignments_with_progress<F>(
 where
     F: Fn(usize, usize, &str) + Send + Sync,
 {
-    evaluate_recipe_on_alignments_with_progress_and_cancel(
-        alignments,
-        recipe,
-        total_unique_taxa,
-        progress_callback,
-        || false,
-    )
-    .expect("a non-cancellable catalog evaluation cannot be cancelled")
-}
-
-/// Evaluates cached alignments while allowing a newer UI request to stop stale work.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn evaluate_recipe_on_alignments_with_progress_and_cancel<F, C>(
-    alignments: &[Alignment],
-    recipe: &TrimmingRecipe,
-    total_unique_taxa: usize,
-    progress_callback: Option<F>,
-    should_cancel: C,
-) -> Option<(Vec<AlignmentSummary>, DatasetOverview)>
-where
-    F: Fn(usize, usize, &str) + Send + Sync,
-    C: Fn() -> bool + Send + Sync,
-{
-    let total = alignments.len();
-    let completed = AtomicUsize::new(0);
-    let runtime_recipe = recipe_with_dataset_sample_filter(recipe, alignments);
-    let summaries: Vec<AlignmentSummary> = alignments
-        .par_iter()
-        .filter_map(|align| {
-            if should_cancel() {
-                return None;
-            }
-            let summary = summarize_alignment(align, &runtime_recipe, total_unique_taxa);
-            if should_cancel() {
-                return None;
-            }
-            let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(ref callback) = progress_callback {
-                callback(current, total, &align.file_name);
-            }
-            Some(summary)
+    let measured =
+        measure_alignments(alignments, recipe, total_unique_taxa, progress_callback, || false)
+            .expect("a run that cannot be cancelled always finishes");
+    let summaries: Vec<AlignmentSummary> = measured
+        .into_iter()
+        .map(|locus| {
+            with_retention(apply_assessment(&locus, recipe, total_unique_taxa), locus.retention)
         })
         .collect();
-
-    if should_cancel() {
-        return None;
-    }
     let overview = compute_dataset_overview(&summaries);
-    Some((summaries, overview))
-}
-
-/// Disk-backed fallback for catalog recalculation with completed-locus progress.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn evaluate_recipe_on_summaries_with_progress<F>(
-    paths: &[String],
-    recipe: &TrimmingRecipe,
-    total_unique_taxa: usize,
-    progress_callback: Option<F>,
-) -> (Vec<AlignmentSummary>, DatasetOverview)
-where
-    F: Fn(usize, usize, &str) + Send + Sync,
-{
-    // Files that cannot be re-read are skipped here; the scan already reported
-    // them, and this path only refreshes metrics for a known dataset.
-    let alignments: Vec<Alignment> = paths
-        .par_iter()
-        .filter_map(|path| parse_alignment(path).ok())
-        .collect();
-    evaluate_recipe_on_alignments_with_progress(
-        &alignments,
-        recipe,
-        total_unique_taxa,
-        progress_callback,
-    )
+    (summaries, overview)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -821,15 +671,13 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("broken.fa"), "ACGT\n>a\nACGT\n").unwrap();
 
-        let (summaries, overview, occupancy, alignments, failures) =
+        let (alignments, occupancy, failures) =
             scan_alignment_directory(&root, None::<fn(usize, usize, &str)>).unwrap();
 
-        let mut ids: Vec<&str> = summaries.iter().map(|summary| summary.id.as_str()).collect();
+        let mut ids: Vec<&str> = alignments.iter().map(|alignment| alignment.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, vec!["locus1", "locus2", "locus3"]);
-        assert_eq!(alignments.len(), 3);
-        assert_eq!(overview.total_alignments, 3);
-        assert_eq!(overview.total_unique_taxa, 3);
+        assert_eq!(occupancy.len(), 3);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert_eq!(failures[0].file_name, "broken.fa");
         let loci_with = |taxon: &str| {
@@ -891,15 +739,18 @@ mod tests {
             .0
         };
         // The browser measures the loci with one recipe and can apply the pass
-        // thresholds of another recipe to the stored measurements.
+        // thresholds of another recipe to the stored measurements. It fetches
+        // the per-sample lists with a separate call.
         let browser_summaries = |measured_with: &TrimmingRecipe, assessed_with: &TrimmingRecipe| {
-            let measure = recipe_with_taxon_presence(measured_with, &dataset_taxa);
+            let measure =
+                CatalogRecipes::new(&recipe_with_taxon_presence(measured_with, &dataset_taxa));
             let assess = recipe_with_taxon_presence(assessed_with, &dataset_taxa);
             browser_alignments
                 .iter()
                 .map(|alignment| {
                     let measured = summarize_alignment_unassessed(alignment, &measure, total_unique_taxa);
-                    apply_assessment(&measured, &assess, total_unique_taxa)
+                    let summary = apply_assessment(&measured, &assess, total_unique_taxa);
+                    with_retention(summary, measured.retention)
                 })
                 .collect::<Vec<_>>()
         };
@@ -954,9 +805,9 @@ mod tests {
             std::fs::write(&path, ">x\nACGT\n>y\nACGA\n").unwrap();
         }
 
-        let (summaries, _, _, _, failures) =
+        let (alignments, _, failures) =
             scan_alignment_directory(&root, None::<fn(usize, usize, &str)>).unwrap();
-        let mut ids: Vec<&str> = summaries.iter().map(|summary| summary.id.as_str()).collect();
+        let mut ids: Vec<&str> = alignments.iter().map(|alignment| alignment.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, vec!["deep", "top"]);
         assert!(failures.is_empty(), "{failures:?}");
@@ -1097,7 +948,7 @@ mod tests {
             vec!["ACGT".to_string()],
         );
 
-        let result = evaluate_recipe_on_alignments_with_progress_and_cancel(
+        let result = measure_alignments(
             &[alignment],
             &TrimmingRecipe::default(),
             1,

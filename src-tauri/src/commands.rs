@@ -1,23 +1,27 @@
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Emitter;
 
 use crate::export::batch::{execute_batch_export, BatchExportConfig, BatchExportResult};
 use crate::export::concatenate::{concatenate_alignments, ConcatenateConfig, ConcatenateResult};
 use crate::export::group::{concatenate_alignments_by_gene, GroupedConcatenateConfig, GroupedConcatenateResult};
+use crate::algorithms::informative::calculate_parsimony_informative_sites;
+use crate::algorithms::stats::compute_majority_consensus;
 use crate::filter_config::{load_filter_config as read_filter_config, save_filter_config as write_filter_config};
 use crate::models::{
     Alignment, AlignmentFormat, AlignmentSummary, DatasetOverview, TaxonOccupancy, TrimmingDiff,
 };
 use crate::parsers::parse_alignment;
 use crate::pipeline::catalog::{
-    evaluate_recipe_on_alignments_with_progress_and_cancel,
-    evaluate_recipe_on_summaries_with_progress, recipe_with_taxon_presence,
-    scan_alignment_directory, ParseFailure,
+    assess_measured, measure_alignments, recipe_with_taxon_presence, scan_alignment_directory,
+    ParseFailure, SampleRetention,
 };
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
-use crate::state::AlignmentCache;
+use crate::state::{AlignmentCache, MeasuredRun};
 
 /// Runs pipeline work and turns a panic into an error the user can see.
 ///
@@ -69,11 +73,19 @@ pub struct ScanResponse {
     pub parse_failures: Vec<ParseFailure>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AlignmentViewResponse {
-    pub raw_alignment: Alignment,
     pub trimmed_alignment: Alignment,
     pub diff: TrimmingDiff,
+    /// The unprocessed locus does not change with the recipe, so it is sent
+    /// only when the viewer asks for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawAlignmentView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RawAlignmentView {
+    pub raw_alignment: Alignment,
     pub pis_mask: Vec<bool>,
     pub majority_consensus: String,
 }
@@ -84,35 +96,107 @@ pub struct CatalogUpdateResponse {
     pub overview: DatasetOverview,
 }
 
+/// Recipe fields that decide only pass and fail. A change in them reuses the
+/// measured loci. The browser keeps the same list (`GATING_FIELDS` in
+/// src/summaries.ts).
+const GATING_FIELDS: [&str; 11] = [
+    "name",
+    "description",
+    "assess_alignment",
+    "min_taxa",
+    "min_taxa_occupancy_percent",
+    "min_length",
+    "max_gap_percent",
+    "min_pis_count",
+    "min_pis_percent",
+    "min_variable_count",
+    "min_variable_percent",
+];
+
+/// Identifies the recipe settings that change the measured loci. The reference
+/// sequences do not serialize, so a hash of them is added.
+fn processing_key(recipe: &TrimmingRecipe) -> String {
+    let mut settings = serde_json::to_value(recipe).expect("a recipe always serializes");
+    if let Some(fields) = settings.as_object_mut() {
+        for field in GATING_FIELDS {
+            fields.remove(field);
+        }
+    }
+    let mut references: Vec<(&String, &String)> = recipe.orf_reference_sequences.iter().collect();
+    references.sort();
+    let mut hasher = DefaultHasher::new();
+    references.hash(&mut hasher);
+    format!("{settings}#{:016x}", hasher.finish())
+}
+
+const SUPERSEDED: &str = "Catalog recalculation superseded by a newer request";
+
+/// Reports folder loading. Reading the files is the first half of the progress
+/// bar, and applying the recipe is the second half, so `current` is a count of
+/// files that can be fractional.
+fn emit_scan_progress(app: &tauri::AppHandle, current: f64, total: usize, file_name: &str) {
+    let percent = if total > 0 {
+        (current / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        "scan_progress",
+        ProgressPayload {
+            current: current.round() as usize,
+            total,
+            percent,
+            file_name: file_name.to_string(),
+        },
+    );
+}
+
 #[tauri::command]
 pub async fn scan_directory(
     app: tauri::AppHandle,
     state: tauri::State<'_, AlignmentCache>,
     dir_path: String,
+    recipe: TrimmingRecipe,
 ) -> Result<ScanResponse, String> {
     let cache = state.inner().clone();
+    // A catalog job for the previous folder must not store its results.
+    let generation = cache.begin_catalog_job();
     tokio::task::spawn_blocking(move || {
       guard_panics("Directory scan", move || {
-        let app_clone = app.clone();
-        let (summaries, overview, occupancy, alignments, parse_failures) =
+        let read_app = app.clone();
+        let (alignments, occupancy, parse_failures) =
             scan_alignment_directory(&dir_path, Some(move |cur, total, name: &str| {
-                let pct = if total > 0 {
-                    (cur as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                };
-                let _ = app_clone.emit(
-                    "scan_progress",
-                    ProgressPayload {
-                        current: cur,
-                        total,
-                        percent: pct,
-                        file_name: name.to_string(),
-                    },
-                );
+                emit_scan_progress(&read_app, cur as f64 / 2.0, total, name);
             }))?;
 
+        // The scan applies the active recipe, so the catalog shows real
+        // summaries at once. Each unique sample has one occupancy entry.
+        let total_unique_taxa = occupancy.len();
+        let measured = measure_alignments(
+            &alignments,
+            &recipe,
+            total_unique_taxa,
+            Some(|done: usize, total: usize, _name: &str| {
+                let emit_every = (total / 100).max(1);
+                if done == total || done.is_multiple_of(emit_every) {
+                    let current = (total + done) as f64 / 2.0;
+                    emit_scan_progress(&app, current, total, "Computing summaries…");
+                }
+            }),
+            || false,
+        )
+        .expect("a folder scan cannot be cancelled");
+
+        let (summaries, mut overview) = assess_measured(&measured, &recipe, total_unique_taxa);
+        overview.total_unique_taxa = total_unique_taxa;
         cache.store(alignments);
+        cache.store_measured_run(
+            generation,
+            MeasuredRun {
+                key: processing_key(&recipe),
+                loci: measured,
+            },
+        );
 
         Ok(ScanResponse {
             summaries,
@@ -132,13 +216,14 @@ pub async fn get_alignment(
     file_path: String,
     recipe: TrimmingRecipe,
     total_unique_taxa: usize,
+    include_raw: bool,
 ) -> Result<AlignmentViewResponse, String> {
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
       guard_panics("Opening the alignment", move || {
         let raw = match cache.get(&file_path) {
             Some(align) => align,
-            None => parse_alignment(PathBuf::from(&file_path))?,
+            None => Arc::new(parse_alignment(PathBuf::from(&file_path))?),
         };
         // Only the taxon lists matter here, so avoid copying the whole dataset's
         // sequences every time the user opens an alignment.
@@ -149,17 +234,19 @@ pub async fn get_alignment(
         let runtime_recipe = recipe_with_taxon_presence(&recipe, &dataset_taxa);
         let (trimmed, diff) = apply_recipe(&raw, &runtime_recipe, total_unique_taxa);
 
-        let (_, _, pis_mask) =
-            crate::algorithms::informative::calculate_parsimony_informative_sites(&raw.sequences, true);
-        let majority_consensus =
-            crate::algorithms::stats::compute_majority_consensus(&raw.sequences, false);
+        let raw_view = include_raw.then(|| {
+            let (_, _, pis_mask) = calculate_parsimony_informative_sites(&raw.sequences, true);
+            RawAlignmentView {
+                majority_consensus: compute_majority_consensus(&raw.sequences, false),
+                pis_mask,
+                raw_alignment: (*raw).clone(),
+            }
+        });
 
         Ok(AlignmentViewResponse {
-            raw_alignment: raw,
             trimmed_alignment: trimmed,
             diff,
-            pis_mask,
-            majority_consensus,
+            raw: raw_view,
         })
       })
     })
@@ -180,7 +267,6 @@ pub async fn recalculate_catalog(
     let generation = cache.begin_catalog_job();
     tokio::task::spawn_blocking(move || {
       guard_panics("Catalog recalculation", move || {
-        let cached = cache.get_by_paths(&paths);
         let app_clone = app.clone();
         let progress_job_id = job_id.clone();
         let progress_callback = move |current: usize, total: usize, file_name: &str| {
@@ -203,35 +289,75 @@ pub async fn recalculate_catalog(
                 );
             }
         };
-        let (summaries, mut overview) = if cached.len() == paths.len() && !cached.is_empty() {
-            evaluate_recipe_on_alignments_with_progress_and_cancel(
-                &cached,
-                &recipe,
-                total_unique_taxa,
-                Some(progress_callback),
-                || !cache.is_catalog_job_current(generation),
-            )
-            .ok_or_else(|| "Catalog recalculation superseded by a newer request".to_string())?
-        } else {
-            if !cache.is_catalog_job_current(generation) {
-                return Err("Catalog recalculation superseded by a newer request".to_string());
+        let is_current = || cache.is_catalog_job_current(generation);
+
+        // When only a pass threshold changed, the measured loci are used again.
+        let key = processing_key(&recipe);
+        let measured = match cache.measured_run(&key, &paths) {
+            Some(run) => run,
+            None => {
+                let cached = cache.get_by_paths(&paths);
+                if cached.len() == paths.len() && !cached.is_empty() {
+                    let loci = measure_alignments(
+                        &cached,
+                        &recipe,
+                        total_unique_taxa,
+                        Some(progress_callback),
+                        || !is_current(),
+                    )
+                    .ok_or_else(|| SUPERSEDED.to_string())?;
+                    cache
+                        .store_measured_run(generation, MeasuredRun { key, loci })
+                        .ok_or_else(|| SUPERSEDED.to_string())?
+                } else {
+                    if !is_current() {
+                        return Err(SUPERSEDED.to_string());
+                    }
+                    // Files that cannot be read again are left out. The scan
+                    // already reported them.
+                    let alignments: Vec<Alignment> = paths
+                        .par_iter()
+                        .filter_map(|path| parse_alignment(path).ok())
+                        .collect();
+                    let loci = measure_alignments(
+                        &alignments,
+                        &recipe,
+                        total_unique_taxa,
+                        Some(progress_callback),
+                        || !is_current(),
+                    )
+                    .ok_or_else(|| SUPERSEDED.to_string())?;
+                    Arc::new(MeasuredRun { key, loci })
+                }
             }
-            evaluate_recipe_on_summaries_with_progress(
-                &paths,
-                &recipe,
-                total_unique_taxa,
-                Some(progress_callback),
-            )
         };
-        if !cache.is_catalog_job_current(generation) {
-            return Err("Catalog recalculation superseded by a newer request".to_string());
+        if !is_current() {
+            return Err(SUPERSEDED.to_string());
         }
+        let (summaries, mut overview) = assess_measured(&measured.loci, &recipe, total_unique_taxa);
         overview.total_unique_taxa = total_unique_taxa;
         Ok(CatalogUpdateResponse { summaries, overview })
       })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The per-sample lists of the latest catalog run, for the QC occupancy chart
+/// and the Matrix view.
+#[tauri::command]
+pub async fn get_retention_details(
+    state: tauri::State<'_, AlignmentCache>,
+) -> Result<Vec<SampleRetention>, String> {
+    let cache = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        cache
+            .latest_measured_run()
+            .map(|run| run.loci.iter().map(|locus| locus.retention.clone()).collect())
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Gives an export the dataset context of the loaded folder: the sample
@@ -464,5 +590,91 @@ mod tests {
         assert_eq!(dataset_taxa, Some(3));
         // b and c are each in 50% of the loci, below the 60% threshold.
         assert_eq!(runtime_recipe.excluded_taxa, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn processing_key_ignores_the_thresholds_only() {
+        let recipe = TrimmingRecipe::default();
+        let fields = serde_json::to_value(&recipe).unwrap();
+        for field in GATING_FIELDS {
+            assert!(fields.get(field).is_some(), "{field} is not a recipe field");
+        }
+
+        let key = processing_key(&recipe);
+        let stricter = TrimmingRecipe {
+            name: "Stricter".to_string(),
+            min_taxa: 40,
+            min_length: 2000,
+            max_gap_percent: 5.0,
+            min_pis_percent: 3.0,
+            ..recipe.clone()
+        };
+        assert_eq!(processing_key(&stricter), key);
+
+        let other_processing = TrimmingRecipe {
+            trim_columns: !recipe.trim_columns,
+            ..recipe.clone()
+        };
+        assert_ne!(processing_key(&other_processing), key);
+
+        // References do not serialize, so they need their own part of the key.
+        let mut with_reference = recipe.clone();
+        with_reference
+            .orf_reference_sequences
+            .insert("locus1".to_string(), "ATGAAA".to_string());
+        let reference_key = processing_key(&with_reference);
+        assert_ne!(reference_key, key);
+        with_reference
+            .orf_reference_sequences
+            .insert("locus1".to_string(), "ATGAAG".to_string());
+        assert_ne!(processing_key(&with_reference), reference_key);
+    }
+
+    #[test]
+    fn a_measured_run_is_used_again_only_for_the_same_settings_and_loci() {
+        let cache = AlignmentCache::new();
+        let alignments: Vec<Alignment> = ["locus1", "locus2"]
+            .iter()
+            .map(|id| {
+                Alignment::new(
+                    id.to_string(),
+                    format!("{id}.fa"),
+                    format!("/data/{id}.fa"),
+                    AlignmentFormat::Fasta,
+                    vec!["a".to_string(), "b".to_string()],
+                    vec!["ACGTACGT".to_string(); 2],
+                )
+            })
+            .collect();
+        let paths: Vec<String> =
+            alignments.iter().map(|alignment| alignment.file_path.clone()).collect();
+        let recipe = TrimmingRecipe::default();
+        let loci =
+            measure_alignments(&alignments, &recipe, 2, None::<fn(usize, usize, &str)>, || false)
+                .unwrap();
+        cache.store(alignments);
+
+        let generation = cache.begin_catalog_job();
+        let key = processing_key(&recipe);
+        assert!(cache
+            .store_measured_run(generation, MeasuredRun { key: key.clone(), loci: loci.clone() })
+            .is_some());
+        assert!(cache.measured_run(&key, &paths).is_some());
+        assert!(cache.measured_run("other settings", &paths).is_none());
+        assert!(cache.measured_run(&key, &paths[..1]).is_none());
+        let reversed: Vec<String> = paths.iter().rev().cloned().collect();
+        assert!(cache.measured_run(&key, &reversed).is_none());
+
+        // A job that a newer one replaced does not store its run.
+        let stale = cache.begin_catalog_job();
+        cache.begin_catalog_job();
+        assert!(cache
+            .store_measured_run(stale, MeasuredRun { key: "stale".to_string(), loci })
+            .is_none());
+        assert!(cache.measured_run(&key, &paths).is_some());
+
+        // A new folder drops the measured run.
+        cache.store(Vec::new());
+        assert!(cache.latest_measured_run().is_none());
     }
 }

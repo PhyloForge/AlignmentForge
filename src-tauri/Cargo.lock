@@ -22,7 +22,6 @@ name = "alignment-forge"
 version = "0.1.0"
 dependencies = [
  "csv",
- "indexmap 2.14.0",
  "rayon",
  "serde",
  "serde-wasm-bindgen",

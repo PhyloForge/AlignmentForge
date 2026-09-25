@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::export::{write_alignment_atomic, write_atomic};
@@ -120,16 +121,16 @@ pub fn concatenate_alignments(
     recipe: &TrimmingRecipe,
     resolved_dataset_taxa: Option<usize>,
 ) -> Result<ConcatenateResult, String> {
-    let mut passing_alignments = Vec::new();
-
-    let raw_alignments: Vec<Alignment> = config
+    // Parse in parallel, then report the first failure in input order.
+    let parsed: Vec<Result<Alignment, String>> = config
         .input_paths
-        .iter()
+        .par_iter()
         .map(|path| {
             parse_alignment(Path::new(path))
                 .map_err(|error| format!("Failed to read input '{path}': {error}"))
         })
-        .collect::<Result<_, _>>()?;
+        .collect();
+    let raw_alignments: Vec<Alignment> = parsed.into_iter().collect::<Result<_, _>>()?;
     let runtime_recipe = if resolved_dataset_taxa.is_none() {
         recipe_with_dataset_sample_filter(recipe, &raw_alignments)
     } else {
@@ -143,12 +144,16 @@ pub fn concatenate_alignments(
             .len()
     });
 
-    for raw in &raw_alignments {
-        let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
-        if (!config.only_passing || diff.pass) && transformed.length > 0 && !transformed.taxa.is_empty() {
-            passing_alignments.push(transformed);
-        }
-    }
+    let passing_alignments: Vec<Alignment> = raw_alignments
+        .par_iter()
+        .filter_map(|raw| {
+            let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
+            let exported = (!config.only_passing || diff.pass)
+                && transformed.length > 0
+                && !transformed.taxa.is_empty();
+            exported.then_some(transformed)
+        })
+        .collect();
 
     if passing_alignments.is_empty() {
         return Err("No passing alignments available for concatenation".to_string());

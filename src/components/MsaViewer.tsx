@@ -19,6 +19,7 @@ import {
   AminoAcidViewerSettings,
   ColorScheme,
   GeneticCode,
+  StopCodonPos,
 } from '../types';
 import { translateClientCodon } from '../sequenceDisplay';
 
@@ -434,6 +435,40 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     return annotatedStops ?? [];
   }, [aminoAcidMode, effectiveViewMode, diff.stop_codons, diff.final_stop_codons]);
 
+  // Stops and masked columns by sample, so a cell looks up its own row instead
+  // of scanning every stop and every mask.
+  const stopsByTaxon = useMemo(() => {
+    const byTaxon = new Map<string, Map<number, StopCodonPos>>();
+    for (const stop of stopCodonsList) {
+      let columns = byTaxon.get(stop.taxon);
+      if (!columns) {
+        columns = new Map();
+        byTaxon.set(stop.taxon, columns);
+      }
+      for (let column = stop.start; column < stop.end; column++) {
+        if (!columns.has(column)) columns.set(column, stop);
+      }
+    }
+    return byTaxon;
+  }, [stopCodonsList]);
+
+  const maskedColumnsByTaxon = useMemo(() => {
+    const byTaxon = new Map<string, Set<number>>();
+    if (effectiveViewMode !== 'overlays') return byTaxon;
+    for (const segment of diff.masked_segments) {
+      let columns = byTaxon.get(segment.taxon);
+      if (!columns) {
+        columns = new Set();
+        byTaxon.set(segment.taxon, columns);
+      }
+      for (let column = segment.start; column < segment.end; column++) columns.add(column);
+    }
+    return byTaxon;
+  }, [effectiveViewMode, diff.masked_segments]);
+
+  const trimmedColumnSet = useMemo(() => new Set(diff.trimmed_columns), [diff.trimmed_columns]);
+  const droppedTaxonSet = useMemo(() => new Set(diff.dropped_taxa), [diff.dropped_taxa]);
+
   // Auto-calculated Taxon Label Width based on longest taxon name
   const autoTaxaWidth = useMemo(() => {
     const maxLen = Math.max(...activeTaxa.map((t) => t.length), 10);
@@ -523,9 +558,15 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
 
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    ctx.scale(dpr, dpr);
+    // Setting the size reallocates and clears the canvas, so only do it when
+    // the size changes. The background fill below clears every frame.
+    const pixelWidth = Math.floor(width * dpr);
+    const pixelHeight = Math.floor(height * dpr);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // Clear background
     ctx.fillStyle = '#0e1014';
@@ -542,83 +583,97 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     const startRow = Math.max(0, Math.floor(scrollY / charHeight));
     const endRow = Math.min(numTaxa, startRow + visibleRows);
 
-    const trimmedColsSet = new Set(diff.trimmed_columns);
-    const droppedTaxaSet = new Set(diff.dropped_taxa);
     const activeOverlay = OVERLAY_COLORS[overlayColor];
+    const nucleotidePalette = NUCLEOTIDE_PALETTES[colorScheme];
 
-    // 1. Draw Sequences & Matrix Cells
+    // Background and text colour of one cell.
+    const cellColors = (uChar: string, consChar: string): [string, string] => {
+      if (aminoAcidMode) {
+        if (aminoAcidViewerSettings.dimConsensusMatches && uChar === consChar) {
+          return ['#14171d', '#6e7681'];
+        }
+        return [activeAminoAcidPalette.colors[uChar] || '#4b5563', activeAminoAcidPalette.textColor];
+      }
+      if (nucleotidePalette) {
+        return [
+          nucleotidePalette.colors[uChar] || '#1f242e',
+          uChar === '-' ? '#4b5563' : nucleotidePalette.textColor,
+        ];
+      }
+      if (colorScheme === 'clustalx') return [CLUSTAL_COLORS[uChar] || '#1f242e', '#ffffff'];
+      if (colorScheme === 'difference') {
+        return uChar === consChar
+          ? ['#14171d', '#4b5563']
+          : [NUC_COLORS[uChar] || '#ff5722', '#ffffff'];
+      }
+      return ['#171b22', '#c9d1d9'];
+    };
+
+    // 1. Draw Sequences & Matrix Cells: the backgrounds first, then the grid as
+    // one path, then the glyphs and overlays on top.
+    for (let r = startRow; r < endRow; r++) {
+      const seq = activeSeqs[r];
+      const rowY = topHeaderHeight + (r * charHeight - scrollY);
+      for (let c = startCol; c < endCol; c++) {
+        const colX = taxaNameWidth + (c * charWidth - scrollX);
+        const uChar = (seq ? seq[c] || '-' : '-').toUpperCase();
+        ctx.fillStyle = cellColors(uChar, displayConsensus[c] || '-')[0];
+        // Below 4 px the view is a bird's eye map without a grid.
+        ctx.fillRect(colX, rowY, charWidth >= 4 ? charWidth : Math.max(1, charWidth), charHeight);
+      }
+    }
+
+    if (charWidth >= 4) {
+      const left = taxaNameWidth + (startCol * charWidth - scrollX);
+      const right = taxaNameWidth + (endCol * charWidth - scrollX);
+      const top = topHeaderHeight + (startRow * charHeight - scrollY);
+      const bottom = topHeaderHeight + (endRow * charHeight - scrollY);
+      ctx.strokeStyle = '#1b1f27';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      for (let c = startCol; c <= endCol; c++) {
+        const x = taxaNameWidth + (c * charWidth - scrollX);
+        ctx.moveTo(x, top);
+        ctx.lineTo(x, bottom);
+      }
+      for (let r = startRow; r <= endRow; r++) {
+        const y = topHeaderHeight + (r * charHeight - scrollY);
+        ctx.moveTo(left, y);
+        ctx.lineTo(right, y);
+      }
+      ctx.stroke();
+    }
+
+    const showGlyphs = charWidth >= 9 && charHeight >= 12;
+    const glyphFont = `${Math.min(charHeight - 4, 12)}px monospace`;
+    ctx.font = glyphFont;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
     for (let r = startRow; r < endRow; r++) {
       const taxonName = activeTaxa[r];
       const seq = activeSeqs[r];
-      const isDropped = effectiveViewMode === 'overlays' && droppedTaxaSet.has(taxonName);
+      const isDropped = effectiveViewMode === 'overlays' && droppedTaxonSet.has(taxonName);
       const rowY = topHeaderHeight + (r * charHeight - scrollY);
+      const rowStops = stopsByTaxon.get(taxonName);
+      const rowMasks = maskedColumnsByTaxon.get(taxonName);
 
       for (let c = startCol; c < endCol; c++) {
         const colX = taxaNameWidth + (c * charWidth - scrollX);
-        const char = seq ? seq[c] || '-' : '-';
-        const uChar = char.toUpperCase();
+        const uChar = (seq ? seq[c] || '-' : '-').toUpperCase();
         const consChar = displayConsensus[c] || '-';
-        const isTrimmedCol = effectiveViewMode === 'overlays' && trimmedColsSet.has(c);
-
-        // Color cell background or text
-        let fillColor = '#171b22';
-        let textColor = '#c9d1d9';
-
-        const nucleotidePalette = NUCLEOTIDE_PALETTES[colorScheme];
-        const matchesConsensus = uChar === consChar;
-        if (aminoAcidMode) {
-          fillColor = activeAminoAcidPalette.colors[uChar] || '#4b5563';
-          textColor = activeAminoAcidPalette.textColor;
-          if (aminoAcidViewerSettings.dimConsensusMatches && matchesConsensus) {
-            fillColor = '#14171d';
-            textColor = '#6e7681';
-          }
-        } else if (nucleotidePalette) {
-          fillColor = nucleotidePalette.colors[uChar] || '#1f242e';
-          textColor = uChar === '-' ? '#4b5563' : nucleotidePalette.textColor;
-        } else if (colorScheme === 'clustalx') {
-          fillColor = CLUSTAL_COLORS[uChar] || '#1f242e';
-          textColor = '#ffffff';
-        } else if (colorScheme === 'difference') {
-          if (uChar === consChar) {
-            fillColor = '#14171d';
-            textColor = '#4b5563';
-          } else {
-            fillColor = NUC_COLORS[uChar] || '#ff5722';
-            textColor = '#ffffff';
-          }
-        }
-
-        // Draw Cell Rect
-        if (charWidth >= 4) {
-          ctx.fillStyle = fillColor;
-          ctx.fillRect(colX, rowY, charWidth, charHeight);
-
-          // Grid line
-          ctx.strokeStyle = '#1b1f27';
-          ctx.lineWidth = 0.5;
-          ctx.strokeRect(colX, rowY, charWidth, charHeight);
-        } else {
-          // Micro bird's eye mode
-          ctx.fillStyle = fillColor;
-          ctx.fillRect(colX, rowY, Math.max(1, charWidth), charHeight);
-        }
+        const isTrimmedCol = effectiveViewMode === 'overlays' && trimmedColumnSet.has(c);
 
         // Draw Character Glyph if zoomed in enough
-        if (charWidth >= 9 && charHeight >= 12) {
-          ctx.fillStyle = textColor;
-          ctx.font = `${Math.min(charHeight - 4, 12)}px monospace`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
+        if (showGlyphs) {
+          ctx.fillStyle = cellColors(uChar, consChar)[1];
           const glyph =
             !aminoAcidMode && colorScheme === 'difference' && uChar === consChar ? '·' : uChar;
           ctx.fillText(glyph, colX + charWidth / 2, rowY + charHeight / 2 + 0.5);
         }
 
         // Stop Codon Indicator: Solid black box with asterisk ONLY on middle base (no letters on outer bases)
-        const stopCodon = stopCodonsList.find(
-          (sc) => sc.taxon === taxonName && c >= sc.start && c < sc.end
-        );
+        const stopCodon = rowStops?.get(c);
         if (stopCodon) {
           ctx.fillStyle = '#000000';
           ctx.fillRect(colX, rowY, charWidth, charHeight);
@@ -631,9 +686,8 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
           if (c === stopCodon.start + 1) {
             ctx.fillStyle = '#ffffff';
             ctx.font = `bold ${Math.min(charHeight, 15)}px monospace`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
             ctx.fillText('*', colX + charWidth / 2, rowY + charHeight / 2 + 1);
+            ctx.font = glyphFont;
           }
         }
 
@@ -652,13 +706,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         }
 
         // HMM / Segment Masked Overlay: Purple/Indigo diagonal hatch
-        const isMaskedSeg =
-          effectiveViewMode === 'overlays' &&
-          diff.masked_segments.some(
-            (seg) => seg.taxon === taxonName && c >= seg.start && c < seg.end
-          );
-
-        if (isMaskedSeg && !isTrimmedCol) {
+        if (!isTrimmedCol && rowMasks?.has(c)) {
           ctx.fillStyle = activeOverlay.fill;
           ctx.fillRect(colX, rowY, charWidth, charHeight);
 
@@ -708,7 +756,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
 
     for (let r = startRow; r < endRow; r++) {
       const taxonName = activeTaxa[r];
-      const isDropped = effectiveViewMode === 'overlays' && droppedTaxaSet.has(taxonName);
+      const isDropped = effectiveViewMode === 'overlays' && droppedTaxonSet.has(taxonName);
       const rowY = topHeaderHeight + (r * charHeight - scrollY);
 
       // Alternating row background, or the selection tint
@@ -796,7 +844,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     // Ruler Ticks and PIS Indicators
     for (let c = startCol; c < endCol; c++) {
       const colX = taxaNameWidth + (c * charWidth - scrollX);
-      const isTrimmedCol = effectiveViewMode === 'overlays' && trimmedColsSet.has(c);
+      const isTrimmedCol = effectiveViewMode === 'overlays' && trimmedColumnSet.has(c);
       const isPis = !aminoAcidMode && effectiveViewMode === 'overlays' && pis_mask[c];
 
       // Protein positions are more compact, so label every 10 residues.
@@ -849,7 +897,10 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     activeTaxa,
     activeSeqs,
     taxaNameWidth,
-    stopCodonsList,
+    stopsByTaxon,
+    maskedColumnsByTaxon,
+    trimmedColumnSet,
+    droppedTaxonSet,
     aminoAcidMode,
     aminoAcidViewerSettings.colorScheme,
     aminoAcidViewerSettings.dimConsensusMatches,
@@ -941,10 +992,8 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
       const consensus = displayConsensus[col] || '-';
       const isPis =
         !aminoAcidMode && effectiveViewMode === 'overlays' && (pis_mask[col] || false);
-      const isTrimmed =
-        effectiveViewMode === 'overlays' && diff.trimmed_columns.includes(col);
-      const isDroppedTaxon =
-        effectiveViewMode === 'overlays' && diff.dropped_taxa.includes(taxon);
+      const isTrimmed = effectiveViewMode === 'overlays' && trimmedColumnSet.has(col);
+      const isDroppedTaxon = effectiveViewMode === 'overlays' && droppedTaxonSet.has(taxon);
 
       // Trimming reason
       let trimReason: string | null = null;
@@ -967,9 +1016,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
       }
 
       // Stop codon check
-      const stopCodon = stopCodonsList.find(
-        (sc) => sc.taxon === taxon && col >= sc.start && col < sc.end
-      );
+      const stopCodon = stopsByTaxon.get(taxon)?.get(col);
 
       setHoverInfo({
         taxon,

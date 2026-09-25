@@ -9,8 +9,8 @@ use wasm_bindgen::prelude::*;
 use crate::models::Alignment;
 use crate::parsers::parse_alignment_text;
 use crate::pipeline::catalog::{
-    apply_assessment, recipe_with_taxon_presence, summarize_alignment_unassessed,
-    UnassessedSummary,
+    apply_assessment, recipe_with_taxon_presence, summarize_alignment_unassessed, CatalogRecipes,
+    SampleRetention, UnassessedSummary,
 };
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
@@ -30,6 +30,9 @@ pub struct EngineSession {
     pending: Vec<UnassessedSummary>,
     /// The full recipe for the current run, including its pass thresholds.
     runtime_recipe: Option<TrimmingRecipe>,
+    /// The recipes that measure each locus in the current run. Built once per
+    /// run, because a recipe can hold thousands of reference sequences.
+    measure_recipes: Option<CatalogRecipes>,
     cache: Vec<CachedRun>,
     /// Every locus's taxon list across the whole dataset, set once after
     /// loading. Passing it on each call would copy it into every worker on
@@ -60,6 +63,7 @@ impl EngineSession {
             alignments: Vec::new(),
             pending: Vec::new(),
             runtime_recipe: None,
+            measure_recipes: None,
             cache: Vec::new(),
             dataset_taxa: Vec::new(),
             total_unique_taxa: 0,
@@ -112,8 +116,11 @@ impl EngineSession {
         // when the measured loci come from the cache.
         let recipe: TrimmingRecipe =
             serde_wasm_bindgen::from_value(recipe).map_err(to_js_error)?;
-        self.runtime_recipe = Some(recipe_with_taxon_presence(&recipe, &self.dataset_taxa));
-        Ok(self.cache.iter().any(|entry| entry.key == cache_key))
+        let runtime_recipe = recipe_with_taxon_presence(&recipe, &self.dataset_taxa);
+        let cached = self.cache.iter().any(|entry| entry.key == cache_key);
+        self.measure_recipes = (!cached).then(|| CatalogRecipes::new(&runtime_recipe));
+        self.runtime_recipe = Some(runtime_recipe);
+        Ok(cached)
     }
 
     /// Summarises one range of this shard into the pending buffer.
@@ -122,15 +129,15 @@ impl EngineSession {
     /// to report progress without paying to serialise each one.
     #[wasm_bindgen(js_name = summarizeChunk)]
     pub fn summarize_chunk(&mut self, start: usize, count: usize) -> Result<(), JsValue> {
-        let runtime = self
-            .runtime_recipe
+        let recipes = self
+            .measure_recipes
             .as_ref()
             .ok_or_else(|| to_js_error("summarizeBegin was not called"))?;
         let end = start.saturating_add(count).min(self.alignments.len());
         for alignment in &self.alignments[start.min(end)..end] {
             self.pending.push(summarize_alignment_unassessed(
                 alignment,
-                runtime,
+                recipes,
                 self.total_unique_taxa,
             ));
         }
@@ -149,6 +156,7 @@ impl EngineSession {
             .runtime_recipe
             .take()
             .ok_or_else(|| to_js_error("summarizeBegin was not called"))?;
+        self.measure_recipes = None;
 
         if let Some(index) = self.cache.iter().position(|entry| entry.key == cache_key) {
             let hit = self.cache.remove(index);
@@ -176,32 +184,13 @@ impl EngineSession {
     /// view needs it.
     #[wasm_bindgen(js_name = retentionDetails)]
     pub fn retention_details(&self, cache_key: &str) -> Result<JsValue, JsValue> {
-        #[derive(serde::Serialize)]
-        struct Retention<'a> {
-            file_path: &'a str,
-            retained_taxa: &'a [String],
-            retained_taxon_basepairs: &'a std::collections::HashMap<String, usize>,
-            orf_retained_taxa: &'a [String],
-            orf_retained_taxon_basepairs: &'a std::collections::HashMap<String, usize>,
-        }
-
         let entry = self
             .cache
             .iter()
             .find(|entry| entry.key == cache_key)
             .ok_or_else(|| to_js_error("No summaries are cached for that recipe"))?;
-
-        let details: Vec<Retention> = entry
-            .summaries
-            .iter()
-            .map(|entry| Retention {
-                file_path: &entry.summary.file_path,
-                retained_taxa: &entry.summary.retained_taxa,
-                retained_taxon_basepairs: &entry.summary.retained_taxon_basepairs,
-                orf_retained_taxa: &entry.summary.orf_retained_taxa,
-                orf_retained_taxon_basepairs: &entry.summary.orf_retained_taxon_basepairs,
-            })
-            .collect();
+        let details: Vec<&SampleRetention> =
+            entry.summaries.iter().map(|locus| &locus.retention).collect();
         to_js(&details)
     }
 
@@ -240,13 +229,31 @@ impl EngineSession {
         to_js(&stats)
     }
 
-    /// Full view of one alignment for the viewer: raw, trimmed, and the diff.
+    /// One alignment for the viewer: trimmed, and the diff. The unprocessed
+    /// locus does not change with the recipe, so it is added only on request.
     #[wasm_bindgen(js_name = viewAlignment)]
     pub fn view_alignment(
         &self,
         file_path: &str,
         recipe: JsValue,
+        include_raw: bool,
     ) -> Result<JsValue, JsValue> {
+        #[derive(serde::Serialize)]
+        struct RawView<'a> {
+            raw_alignment: &'a Alignment,
+            pis_mask: Vec<bool>,
+            majority_consensus: String,
+        }
+        #[derive(serde::Serialize)]
+        struct View<'a> {
+            trimmed_alignment: Alignment,
+            /// A JSON value, which writes the column numbers of `column_reasons`
+            /// as strings. The JavaScript serializer accepts only string keys.
+            diff: serde_json::Value,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            raw: Option<RawView<'a>>,
+        }
+
         let recipe: TrimmingRecipe =
             serde_wasm_bindgen::from_value(recipe).map_err(to_js_error)?;
         let runtime = recipe_with_taxon_presence(&recipe, &self.dataset_taxa);
@@ -259,22 +266,26 @@ impl EngineSession {
             .ok_or_else(|| to_js_error(format!("Alignment not found: {file_path}")))?;
 
         let (trimmed, diff) = apply_recipe(raw, &runtime, total_unique_taxa);
-        let (_, _, pis_mask) =
-            crate::algorithms::informative::calculate_parsimony_informative_sites(
-                &raw.sequences,
-                true,
-            );
-        let majority_consensus =
-            crate::algorithms::stats::compute_majority_consensus(&raw.sequences, false);
-
-        let response = serde_json::json!({
-            "raw_alignment": raw,
-            "trimmed_alignment": trimmed,
-            "diff": diff,
-            "pis_mask": pis_mask,
-            "majority_consensus": majority_consensus,
+        let raw_view = include_raw.then(|| {
+            let (_, _, pis_mask) =
+                crate::algorithms::informative::calculate_parsimony_informative_sites(
+                    &raw.sequences,
+                    true,
+                );
+            RawView {
+                raw_alignment: raw,
+                pis_mask,
+                majority_consensus: crate::algorithms::stats::compute_majority_consensus(
+                    &raw.sequences,
+                    false,
+                ),
+            }
         });
-        to_js(&response)
+        to_js(&View {
+            trimmed_alignment: trimmed,
+            diff: serde_json::to_value(&diff).map_err(to_js_error)?,
+            raw: raw_view,
+        })
     }
 }
 
@@ -285,10 +296,8 @@ impl Default for EngineSession {
 }
 
 impl EngineSession {
-    /// Applies the thresholds and drops the per-sample retention lists.
-    ///
-    /// Only the QC occupancy chart needs those lists, and carrying them on
-    /// every recipe change copies a taxon list for every locus.
+    /// Applies the thresholds. The summaries leave out the per-sample lists,
+    /// which `retentionDetails` returns.
     fn assess_all(
         &self,
         summaries: &[UnassessedSummary],
@@ -296,14 +305,7 @@ impl EngineSession {
     ) -> Vec<crate::models::AlignmentSummary> {
         summaries
             .iter()
-            .map(|entry| {
-                let mut light = apply_assessment(entry, recipe, self.total_unique_taxa);
-                light.retained_taxa = Vec::new();
-                light.retained_taxon_basepairs = std::collections::HashMap::new();
-                light.orf_retained_taxa = Vec::new();
-                light.orf_retained_taxon_basepairs = std::collections::HashMap::new();
-                light
-            })
+            .map(|entry| apply_assessment(entry, recipe, self.total_unique_taxa))
             .collect()
     }
 }

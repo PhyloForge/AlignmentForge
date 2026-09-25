@@ -8,16 +8,46 @@
  */
 import type {
   AlignmentSummary,
-  AlignmentViewResponse,
+  AlignmentViewUpdate,
   ParseFailure,
+  RetentionDetail,
   TaxonOccupancy,
   TrimmingRecipe,
 } from '../types';
+import { processingRecipeKey } from '../summaries';
 import type { AlignmentInput } from './engineWorker';
+import wasmUrl from '../engine-wasm/engine_bg.wasm?url';
+
+type ProgressCallback = (done: number, total: number) => void;
 
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
+  onProgress?: ProgressCallback;
+}
+
+let compiledEngine: Promise<WebAssembly.Module> | null = null;
+
+/** Compiles the engine once. Every worker instantiates this one module. */
+function compileEngine(): Promise<WebAssembly.Module> {
+  if (!compiledEngine) {
+    compiledEngine = fetch(wasmUrl)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Could not load the engine: ${response.status} ${response.statusText}`);
+        }
+        // Streaming compilation needs the application/wasm type, which some
+        // static hosts do not send.
+        return response.headers.get('Content-Type') === 'application/wasm'
+          ? WebAssembly.compileStreaming(response)
+          : WebAssembly.compile(await response.arrayBuffer());
+      })
+      .catch((error) => {
+        compiledEngine = null;
+        throw error;
+      });
+  }
+  return compiledEngine;
 }
 
 class EngineWorker {
@@ -27,8 +57,6 @@ class EngineWorker {
   private failed = false;
   /** File paths this worker holds, so a view request reaches the right shard. */
   readonly filePaths = new Set<string>();
-  /** Reports partial completion of an in-flight request. */
-  onProgress?: (requestId: number, done: number, total: number) => void;
 
   constructor() {
     this.worker = new Worker(new URL('./engineWorker.ts', import.meta.url), {
@@ -37,7 +65,7 @@ class EngineWorker {
     this.worker.onmessage = (event) => {
       const { requestId, ok, result, error, progressFor, done, total } = event.data;
       if (progressFor !== undefined) {
-        this.onProgress?.(progressFor, done, total);
+        this.pending.get(progressFor)?.onProgress?.(done, total);
         return;
       }
       const entry = this.pending.get(requestId);
@@ -46,32 +74,38 @@ class EngineWorker {
       if (ok) entry.resolve(result);
       else entry.reject(new Error(error));
     };
-    this.worker.onerror = (event) => {
-      const failure = new Error(event.message || 'Engine worker failed');
-      this.failed = true;
-      for (const entry of this.pending.values()) entry.reject(failure);
-      this.pending.clear();
-      this.worker.terminate();
-    };
+    this.worker.onerror = (event) => this.fail(new Error(event.message || 'Engine worker failed'));
+    // Requests sent before the module arrives wait in the worker.
+    compileEngine().then(
+      (module) => this.worker.postMessage({ kind: 'init', module }),
+      (error) => this.fail(error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
-  send<T>(request: Record<string, unknown>): Promise<T> {
+  send<T>(request: Record<string, unknown>, onProgress?: ProgressCallback): Promise<T> {
     if (this.failed) {
       return Promise.reject(new Error('Engine worker is unavailable; reload the dataset'));
     }
     const requestId = this.nextRequestId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
+      this.pending.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        onProgress,
+      });
       this.worker.postMessage({ ...request, requestId });
     });
   }
 
-  terminate() {
-    const cancellation = new Error('Engine request cancelled because the worker was terminated');
-    for (const entry of this.pending.values()) entry.reject(cancellation);
+  private fail(failure: Error) {
     this.failed = true;
-    this.worker.terminate();
+    for (const entry of this.pending.values()) entry.reject(failure);
     this.pending.clear();
+    this.worker.terminate();
+  }
+
+  terminate() {
+    this.fail(new Error('Engine request cancelled because the worker was terminated'));
   }
 }
 
@@ -81,41 +115,6 @@ export interface LoadedDataset {
   parseFailures: ParseFailure[];
   /** Order in which loci are distributed, so summaries can be reassembled. */
   orderedPaths: string[];
-}
-
-export interface RetentionDetail {
-  file_path: string;
-  retained_taxa: string[];
-  retained_taxon_basepairs: Record<string, number>;
-  orf_retained_taxa: string[];
-  orf_retained_taxon_basepairs: Record<string, number>;
-}
-
-/**
- * Identifies a recipe for the worker-side result cache.
- *
- * Only the fields that change processing are included. The pass thresholds are
- * left out because the engine caches the measured loci and applies gating on
- * top of them, so moving a threshold reuses the cached measurements.
- */
-function recipeCacheKey(recipe: TrimmingRecipe): string {
-  const fields: Record<string, unknown> = { ...recipe };
-  for (const gatingField of [
-    'name',
-    'description',
-    'assess_alignment',
-    'min_taxa',
-    'min_taxa_occupancy_percent',
-    'min_length',
-    'max_gap_percent',
-    'min_pis_count',
-    'min_pis_percent',
-    'min_variable_count',
-    'min_variable_percent',
-  ]) {
-    delete fields[gatingField];
-  }
-  return JSON.stringify(fields);
 }
 
 export class EnginePool {
@@ -158,18 +157,13 @@ export class EnginePool {
     const perShard = await Promise.all(
       shards.map(async (shard, index) => {
         const worker = this.workers[index];
-        worker.onProgress = (_requestId, done) => {
-          doneByWorker.set(worker, done);
-          reportLoaded();
-        };
-        const result = await worker
-          .send<{ taxa: string[][]; failures: ParseFailure[] }>({
-            kind: 'load',
-            alignments: shard,
-          })
-          .finally(() => {
-            worker.onProgress = undefined;
-          });
+        const result = await worker.send<{ taxa: string[][]; failures: ParseFailure[] }>(
+          { kind: 'load', alignments: shard },
+          (done) => {
+            doneByWorker.set(worker, done);
+            reportLoaded();
+          }
+        );
         for (const alignment of shard) worker.filePaths.add(alignment.file_path);
         doneByWorker.set(worker, shard.length);
         reportLoaded();
@@ -207,43 +201,43 @@ export class EnginePool {
    * Summarises every loaded locus, in parallel across the pool.
    *
    * Workers report partial completion as they go, and those counts are summed
-   * so the caller sees one moving figure for the whole dataset.
+   * so the caller sees one moving figure for the whole dataset. A newer call
+   * stops this one in the workers, and this call then rejects.
    */
   async summarize(
     recipe: TrimmingRecipe,
-    onProgress?: (done: number, total: number) => void
+    onProgress?: ProgressCallback
   ): Promise<AlignmentSummary[]> {
     if (!this.dataset) return [];
-    const cacheKey = recipeCacheKey(recipe);
+    const cacheKey = processingRecipeKey(recipe);
     this.lastCacheKey = cacheKey;
     const totalLoci = this.dataset.orderedPaths.length;
     const doneByWorker = new Map<EngineWorker, number>();
 
     const results = await Promise.all(
-      this.workers.map((worker) => {
-        worker.onProgress = (_requestId, done) => {
+      this.workers.map((worker) =>
+        worker.send<AlignmentSummary[]>({ kind: 'summarize', recipe, cacheKey }, (done) => {
           doneByWorker.set(worker, done);
           let completed = 0;
           for (const value of doneByWorker.values()) completed += value;
           onProgress?.(Math.min(completed, totalLoci), totalLoci);
-        };
-        return worker
-          .send<AlignmentSummary[]>({ kind: 'summarize', recipe, cacheKey })
-          .finally(() => {
-            worker.onProgress = undefined;
-          });
-      })
+        })
+      )
     );
     onProgress?.(totalLoci, totalLoci);
     return results.flat();
   }
 
-  /** Full viewer payload for one locus, from the worker that holds it. */
-  async view(filePath: string, recipe: TrimmingRecipe): Promise<AlignmentViewResponse> {
+  /** Viewer data for one locus, from the worker that holds it. */
+  async view(
+    filePath: string,
+    recipe: TrimmingRecipe,
+    includeRaw: boolean
+  ): Promise<AlignmentViewUpdate> {
     if (!this.dataset) throw new Error('No dataset is loaded');
     const worker = this.workers.find((candidate) => candidate.filePaths.has(filePath));
     if (!worker) throw new Error(`Alignment not found: ${filePath}`);
-    return worker.send<AlignmentViewResponse>({ kind: 'view', filePath, recipe });
+    return worker.send<AlignmentViewUpdate>({ kind: 'view', filePath, recipe, includeRaw });
   }
 
   /** Dataset-wide taxon occupancy, merged from every shard. */
@@ -299,8 +293,14 @@ export class EnginePool {
   }
 
   async presets(): Promise<TrimmingRecipe[]> {
-    this.ensureWorkers(1);
-    return this.workers[0].send<TrimmingRecipe[]>({ kind: 'presets' });
+    // A worker of its own, so a dataset load that replaces the pool cannot stop
+    // this request. The engine is compiled once, so the extra worker is cheap.
+    const worker = new EngineWorker();
+    try {
+      return await worker.send<TrimmingRecipe[]>({ kind: 'presets' });
+    } finally {
+      worker.terminate();
+    }
   }
 
   hasDataset(): boolean {

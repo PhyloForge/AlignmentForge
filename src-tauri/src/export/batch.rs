@@ -352,10 +352,8 @@ pub fn execute_batch_export(
                 if let Some((exon_start, exon_end)) = exon_span {
                     let intron_alignment = intron_alignment_outside(raw_align, exon_start, exon_end);
                     if intron_alignment.length > 0 {
-                        let mut intron_recipe = catalog_recipe.clone();
-                        intron_recipe.orf_reference_sequences.clear();
                         let (filtered_intron, intron_diff) =
-                            apply_recipe(&intron_alignment, &intron_recipe, total_dataset_taxa);
+                            apply_recipe(&intron_alignment, &catalog_recipe, total_dataset_taxa);
                         let should_export_intron = !config.only_passing || intron_diff.pass;
                         if should_export_intron
                             && !filtered_intron.sequences.is_empty()

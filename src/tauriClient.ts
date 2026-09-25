@@ -1,6 +1,6 @@
 import {
   AlignmentSummary,
-  AlignmentViewResponse,
+  AlignmentViewUpdate,
   BatchExportConfig,
   BatchExportResult,
   CatalogUpdateResponse,
@@ -9,6 +9,7 @@ import {
   GroupedConcatenateConfig,
   GroupedConcatenateResult,
   ParseFailure,
+  RetentionDetail,
   ScanResponse,
   TrimmingRecipe,
 } from './types';
@@ -199,11 +200,12 @@ export async function exportAlignmentStatsCsv(
   return invokeTauri<string>('save_alignment_stats_csv', { filePath, summaries });
 }
 
-export async function scanDirectory(dirPath: string): Promise<ScanResponse> {
+/** Reads a folder and applies the recipe, so the summaries are final at once. */
+export async function scanDirectory(dirPath: string, recipe: TrimmingRecipe): Promise<ScanResponse> {
   if (!isTauri) {
     throw new Error('Loading a folder by path is available in the desktop app.');
   }
-  return invokeTauri<ScanResponse>('scan_directory', { dirPath });
+  return invokeTauri<ScanResponse>('scan_directory', { dirPath, recipe });
 }
 
 export async function loadDirectoryFromFiles(
@@ -284,18 +286,40 @@ async function loadIntoEngine(
   };
 }
 
-export async function getAlignment(
+/**
+ * The trimmed locus and its diff for the viewer. The unprocessed locus does not
+ * change with the recipe, so it comes back only when `includeRaw` is set.
+ */
+export async function getAlignmentView(
   filePath: string,
   recipe: TrimmingRecipe,
-  totalUniqueTaxa: number = 0
-): Promise<AlignmentViewResponse> {
+  totalUniqueTaxa: number,
+  includeRaw: boolean
+): Promise<AlignmentViewUpdate> {
   if (isTauri) {
-    return invokeTauri<AlignmentViewResponse>('get_alignment', { filePath, recipe, totalUniqueTaxa });
+    return invokeTauri<AlignmentViewUpdate>('get_alignment', {
+      filePath,
+      recipe,
+      totalUniqueTaxa,
+      includeRaw,
+    });
   } else {
     // The engine owns the alignments inside the workers, so the view is built
     // by the shard that holds this locus.
-    return enginePool.view(filePath, recipe);
+    return enginePool.view(filePath, recipe, includeRaw);
   }
+}
+
+/**
+ * Per-sample retention of the latest catalog run, by file path. Only the QC
+ * occupancy chart and the Matrix view need it, so the summaries leave it out.
+ */
+export async function getRetentionDetails(): Promise<Map<string, RetentionDetail>> {
+  if (isTauri) {
+    const details = await invokeTauri<RetentionDetail[]>('get_retention_details');
+    return new Map(details.map((detail) => [detail.file_path, detail]));
+  }
+  return enginePool.retentionDetails();
 }
 
 export async function recalculateCatalog(

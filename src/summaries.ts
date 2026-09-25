@@ -45,6 +45,47 @@ export const DIVERGENCE_NOTE =
   'Approximate value. For a locus with 40 or more samples, it uses 20 to 30 samples at equal intervals.';
 
 /**
+ * Recipe fields that decide only pass and fail. A change in them reuses the
+ * measured loci. Keep in step with `GATING_FIELDS` in src-tauri/src/commands.rs.
+ */
+const GATING_FIELDS = [
+  'name',
+  'description',
+  'assess_alignment',
+  'min_taxa',
+  'min_taxa_occupancy_percent',
+  'min_length',
+  'max_gap_percent',
+  'min_pis_count',
+  'min_pis_percent',
+  'min_variable_count',
+  'min_variable_percent',
+] as const satisfies readonly (keyof TrimmingRecipe)[];
+
+// A reference set is replaced, never edited in place, so each set object gets
+// one number, and the key holds that number instead of every sequence.
+const referenceSetIds = new WeakMap<object, number>();
+let lastReferenceSetId = 0;
+
+function referenceSetId(references: Record<string, string> | undefined): number {
+  if (!references || Object.keys(references).length === 0) return 0;
+  let id = referenceSetIds.get(references);
+  if (id === undefined) {
+    id = ++lastReferenceSetId;
+    referenceSetIds.set(references, id);
+  }
+  return id;
+}
+
+/** Identifies the recipe settings that change the measured loci. */
+export function processingRecipeKey(recipe: TrimmingRecipe): string {
+  const fields: Partial<TrimmingRecipe> = { ...recipe };
+  for (const field of GATING_FIELDS) delete fields[field];
+  delete fields.orf_reference_sequences;
+  return `${JSON.stringify(fields)}#${referenceSetId(recipe.orf_reference_sequences)}`;
+}
+
+/**
  * The ordinary alignment branch used by the catalog and the general export.
  * ORF extraction is a separate outcome and must not change what the catalog
  * measures or how it decides pass and fail.

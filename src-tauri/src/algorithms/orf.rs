@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::models::MaskedSegment;
-use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -155,46 +154,73 @@ pub fn should_skip_orf_locus(locus_id: &str, search_mode: OrfSearchMode) -> bool
         || (search_mode == OrfSearchMode::ContinuousCds && continuous_cds_only)
 }
 
+fn complement_base(base: char) -> char {
+    match base {
+        'A' => 'T',
+        'a' => 't',
+        'T' | 'U' => 'A',
+        't' | 'u' => 'a',
+        'C' => 'G',
+        'c' => 'g',
+        'G' => 'C',
+        'g' => 'c',
+        'R' => 'Y',
+        'r' => 'y',
+        'Y' => 'R',
+        'y' => 'r',
+        'S' => 'S',
+        's' => 's',
+        'W' => 'W',
+        'w' => 'w',
+        'K' => 'M',
+        'k' => 'm',
+        'M' => 'K',
+        'm' => 'k',
+        'B' => 'V',
+        'b' => 'v',
+        'D' => 'H',
+        'd' => 'h',
+        'H' => 'D',
+        'h' => 'd',
+        'V' => 'B',
+        'v' => 'b',
+        other => other,
+    }
+}
+
 /// Computes reverse complement of a DNA sequence
 pub fn reverse_complement_dna(seq: &str) -> String {
-    seq.chars()
-        .rev()
-        .map(|c| match c {
-            'A' => 'T',
-            'a' => 't',
-            'T' | 'U' => 'A',
-            't' | 'u' => 'a',
-            'C' => 'G',
-            'c' => 'g',
-            'G' => 'C',
-            'g' => 'c',
-            'R' => 'Y',
-            'r' => 'y',
-            'Y' => 'R',
-            'y' => 'r',
-            'S' => 'S',
-            's' => 's',
-            'W' => 'W',
-            'w' => 'w',
-            'K' => 'M',
-            'k' => 'm',
-            'M' => 'K',
-            'm' => 'k',
-            'B' => 'V',
-            'b' => 'v',
-            'D' => 'H',
-            'd' => 'h',
-            'H' => 'D',
-            'h' => 'd',
-            'V' => 'B',
-            'v' => 'b',
-            '-' => '-',
-            '?' => '?',
-            'N' => 'N',
-            'n' => 'n',
-            other => other,
-        })
-        .collect()
+    if seq.is_ascii() {
+        // One byte per base, so the bytes can be reversed directly.
+        let bytes: Vec<u8> = seq
+            .bytes()
+            .rev()
+            .map(|base| complement_base(base as char) as u8)
+            .collect();
+        return String::from_utf8(bytes).expect("the complement of ASCII is ASCII");
+    }
+    seq.chars().rev().map(complement_base).collect()
+}
+
+/// Amino acids of the 64 codons in the NCBI order: the first, the second, and
+/// the third base each run through T, C, A, G.
+const STANDARD_CODE: &[u8; 64] =
+    b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+const VERTEBRATE_MITOCHONDRIAL_CODE: &[u8; 64] =
+    b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG";
+const INVERTEBRATE_MITOCHONDRIAL_CODE: &[u8; 64] =
+    b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG";
+
+/// Position of a base in the NCBI order T, C, A, G. RNA alignments spell
+/// thymine as uracil. Missing data and ambiguity codes have no position.
+fn codon_table_position(base: u8) -> Option<usize> {
+    match base.to_ascii_uppercase() {
+        b'T' | b'U' => Some(0),
+        b'C' => Some(1),
+        b'A' => Some(2),
+        b'G' => Some(3),
+        _ => None,
+    }
 }
 
 /// Translates a single 3-base codon into an Amino Acid or Stop ('*')
@@ -202,108 +228,22 @@ pub fn translate_codon(codon: &[u8], code: GeneticCode) -> char {
     if codon.len() < 3 {
         return '-';
     }
-    // RNA alignments spell thymine as uracil. Normalising here means every
-    // genetic code below only needs the DNA spelling of each codon.
-    let to_dna = |base: u8| -> char {
-        let upper = (base as char).to_ascii_uppercase();
-        if upper == 'U' {
-            'T'
-        } else {
-            upper
-        }
-    };
-    let c1 = to_dna(codon[0]);
-    let c2 = to_dna(codon[1]);
-    let c3 = to_dna(codon[2]);
-
-    if c1 == '-' || c2 == '-' || c3 == '-' {
+    if codon[..3].contains(&b'-') {
         return '-';
     }
-    if c1 == '?' || c2 == '?' || c3 == '?' || c1 == 'N' || c2 == 'N' || c3 == 'N' {
+    let (Some(first), Some(second), Some(third)) = (
+        codon_table_position(codon[0]),
+        codon_table_position(codon[1]),
+        codon_table_position(codon[2]),
+    ) else {
         return 'X';
-    }
-
-    let trip = [c1 as u8, c2 as u8, c3 as u8];
-
-    match code {
-        GeneticCode::Standard => match &trip {
-            b"TAA" | b"TAG" | b"TGA" => '*',
-            b"TTT" | b"TTC" => 'F',
-            b"TTA" | b"TTG" | b"CTT" | b"CTC" | b"CTA" | b"CTG" => 'L',
-            b"ATT" | b"ATC" | b"ATA" => 'I',
-            b"ATG" => 'M',
-            b"GTT" | b"GTC" | b"GTA" | b"GTG" => 'V',
-            b"TCT" | b"TCC" | b"TCA" | b"TCG" | b"AGT" | b"AGC" => 'S',
-            b"CCT" | b"CCC" | b"CCA" | b"CCG" => 'P',
-            b"ACT" | b"ACC" | b"ACA" | b"ACG" => 'T',
-            b"GCT" | b"GCC" | b"GCA" | b"GCG" => 'A',
-            b"TAT" | b"TAC" => 'Y',
-            b"CAT" | b"CAC" => 'H',
-            b"CAA" | b"CAG" => 'Q',
-            b"AAT" | b"AAC" => 'N',
-            b"AAA" | b"AAG" => 'K',
-            b"GAT" | b"GAC" => 'D',
-            b"GAA" | b"GAG" => 'E',
-            b"TGT" | b"TGC" => 'C',
-            b"TGG" => 'W',
-            b"CGT" | b"CGC" | b"CGA" | b"CGG" | b"AGA" | b"AGG" => 'R',
-            b"GGT" | b"GGC" | b"GGA" | b"GGG" => 'G',
-            _ => 'X',
-        },
-        GeneticCode::VertebrateMitochondrial => match &trip {
-            b"TAA" | b"TAG" | b"AGA" | b"AGG" => '*',
-            b"TGA" => 'W',
-            b"ATA" => 'M',
-            b"TTT" | b"TTC" => 'F',
-            b"TTA" | b"TTG" | b"CTT" | b"CTC" | b"CTA" | b"CTG" => 'L',
-            b"ATT" | b"ATC" => 'I',
-            b"ATG" => 'M',
-            b"GTT" | b"GTC" | b"GTA" | b"GTG" => 'V',
-            b"TCT" | b"TCC" | b"TCA" | b"TCG" | b"AGT" | b"AGC" => 'S',
-            b"CCT" | b"CCC" | b"CCA" | b"CCG" => 'P',
-            b"ACT" | b"ACC" | b"ACA" | b"ACG" => 'T',
-            b"GCT" | b"GCC" | b"GCA" | b"GCG" => 'A',
-            b"TAT" | b"TAC" => 'Y',
-            b"CAT" | b"CAC" => 'H',
-            b"CAA" | b"CAG" => 'Q',
-            b"AAT" | b"AAC" => 'N',
-            b"AAA" | b"AAG" => 'K',
-            b"GAT" | b"GAC" => 'D',
-            b"GAA" | b"GAG" => 'E',
-            b"TGT" | b"TGC" => 'C',
-            b"TGG" => 'W',
-            b"CGT" | b"CGC" | b"CGA" | b"CGG" => 'R',
-            b"GGT" | b"GGC" | b"GGA" | b"GGG" => 'G',
-            _ => 'X',
-        },
-        GeneticCode::InvertebrateMitochondrial => match &trip {
-            b"TAA" | b"TAG" => '*',
-            b"TGA" => 'W',
-            b"ATA" => 'M',
-            b"AGA" | b"AGG" => 'S',
-            b"TTT" | b"TTC" => 'F',
-            b"TTA" | b"TTG" | b"CTT" | b"CTC" | b"CTA" | b"CTG" => 'L',
-            b"ATT" | b"ATC" => 'I',
-            b"ATG" => 'M',
-            b"GTT" | b"GTC" | b"GTA" | b"GTG" => 'V',
-            b"TCT" | b"TCC" | b"TCA" | b"TCG" | b"AGT" | b"AGC" => 'S',
-            b"CCT" | b"CCC" | b"CCA" | b"CCG" => 'P',
-            b"ACT" | b"ACC" | b"ACA" | b"ACG" => 'T',
-            b"GCT" | b"GCC" | b"GCA" | b"GCG" => 'A',
-            b"TAT" | b"TAC" => 'Y',
-            b"CAT" | b"CAC" => 'H',
-            b"CAA" | b"CAG" => 'Q',
-            b"AAT" | b"AAC" => 'N',
-            b"AAA" | b"AAG" => 'K',
-            b"GAT" | b"GAC" => 'D',
-            b"GAA" | b"GAG" => 'E',
-            b"TGT" | b"TGC" => 'C',
-            b"TGG" => 'W',
-            b"CGT" | b"CGC" | b"CGA" | b"CGG" => 'R',
-            b"GGT" | b"GGC" | b"GGA" | b"GGG" => 'G',
-            _ => 'X',
-        },
-    }
+    };
+    let table = match code {
+        GeneticCode::Standard => STANDARD_CODE,
+        GeneticCode::VertebrateMitochondrial => VERTEBRATE_MITOCHONDRIAL_CODE,
+        GeneticCode::InvertebrateMitochondrial => INVERTEBRATE_MITOCHONDRIAL_CODE,
+    };
+    char::from(table[16 * first + 4 * second + third])
 }
 
 /// Evaluates one explicit reading frame across the alignment. Positive frames
@@ -403,16 +343,17 @@ fn protein_profile_conservation(
 
     for codon_index in 0..codon_count {
         let start = offset + codon_index * 3;
-        let mut counts: HashMap<char, usize> = HashMap::new();
+        // One count per letter. `translate_codon` gives upper-case letters.
+        let mut counts = [0usize; 26];
         for sequence in sequences {
             let amino_acid = translate_codon(&sequence.as_bytes()[start..start + 3], code);
             if !matches!(amino_acid, '*' | 'X' | '-') {
-                *counts.entry(amino_acid).or_insert(0) += 1;
+                counts[(amino_acid as u8 - b'A') as usize] += 1;
             }
         }
-        let total: usize = counts.values().sum();
+        let total: usize = counts.iter().sum();
         if total >= 2 {
-            conservation_sum += counts.values().copied().max().unwrap_or(0) as f64 / total as f64;
+            conservation_sum += counts.iter().copied().max().unwrap_or(0) as f64 / total as f64;
             informative_columns += 1;
         }
     }
@@ -432,11 +373,11 @@ fn synonymous_change_fraction(sequences: &[String], code: GeneticCode) -> f64 {
 
     for codon_index in 0..codon_count {
         let start = codon_index * 3;
-        // Insertion ordered so the consensus tie-break is reproducible. A plain
-        // HashMap randomises iteration per process, which made the coding score
-        // - and therefore an accept or reject at min_coding_score - vary between
-        // runs on identical input.
-        let mut counts: IndexMap<[u8; 3], usize> = IndexMap::new();
+        // Counts in the order the codons first occur, so the consensus tie-break
+        // is reproducible. A plain HashMap randomises iteration per process,
+        // which made the coding score - and therefore an accept or reject at
+        // min_coding_score - vary between runs on identical input.
+        let mut counts: Vec<([u8; 3], usize)> = Vec::new();
         for sequence in sequences {
             let bytes = sequence.as_bytes();
             let codon = [
@@ -445,7 +386,10 @@ fn synonymous_change_fraction(sequences: &[String], code: GeneticCode) -> f64 {
                 bytes[start + 2].to_ascii_uppercase(),
             ];
             if !matches!(translate_codon(&codon, code), '*' | 'X' | '-') {
-                *counts.entry(codon).or_insert(0) += 1;
+                match counts.iter_mut().find(|(seen, _)| *seen == codon) {
+                    Some((_, count)) => *count += 1,
+                    None => counts.push((codon, 1)),
+                }
             }
         }
         // The first codon reaching the highest count wins, matching the browser
@@ -722,7 +666,10 @@ pub fn find_best_shared_orf_segment(
         }
     }
 
-    for candidate in &mut candidates {
+    // The candidates are in rank order, so the first one that passes is the
+    // result. The others need their evidence only when no candidate passes.
+    for index in 0..candidates.len() {
+        let candidate = &mut candidates[index];
         let oriented = if candidate.is_reverse {
             &reverse_sequences
         } else {
@@ -733,13 +680,9 @@ pub fn find_best_shared_orf_segment(
         candidate.coding_score = coding_score;
         candidate.amino_acid_conservation = amino_acid_conservation;
         candidate.frame_contrast = frame_contrast;
-    }
-
-    if let Some(index) = candidates
-        .iter()
-        .position(|candidate| candidate.coding_score >= min_coding_score)
-    {
-        return Some(candidates.remove(index));
+        if coding_score >= min_coding_score {
+            return Some(candidates.remove(index));
+        }
     }
 
     candidates.into_iter().max_by(|left, right| {

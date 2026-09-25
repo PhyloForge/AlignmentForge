@@ -5,7 +5,8 @@
  * The two builds share the Rust source, but the browser reads text, splits each
  * run across several calls, and converts values through wasm-bindgen. This
  * check runs both builds on the same files and recipes, and compares every
- * field of every locus summary. Run `npm run build:wasm` first.
+ * field of every locus summary and of the viewer data. Run `npm run build:wasm`
+ * first.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -37,7 +38,7 @@ const recipes = [
 ];
 
 /** Runs the recipes through the calls that a browser worker makes. */
-function browserSummaries(files) {
+function browserRuns(files) {
   const session = new EngineSession();
   const datasetTaxa = files.map((file) => {
     const name = basename(file);
@@ -47,21 +48,35 @@ function browserSummaries(files) {
   });
   session.setDataset(datasetTaxa, new Set(datasetTaxa.flat()).size);
 
-  return recipes.map((recipe, index) => {
+  const summaries = recipes.map((recipe, index) => {
     const cacheKey = `recipe-${index}`;
     session.summarizeBegin(recipe, cacheKey);
     session.summarizeChunk(0, files.length);
-    const summaries = session.summarizeFinish(cacheKey);
+    const run = session.summarizeFinish(cacheKey);
     // The browser fetches the per-sample lists with a separate call.
     const retention = new Map(
       session.retentionDetails(cacheKey).map((detail) => [detail.file_path, detail])
     );
-    return summaries.map((summary) => ({ ...summary, ...retention.get(summary.file_path) }));
+    return run.map((summary) => ({ ...summary, ...retention.get(summary.file_path) }));
   });
+  const views = recipes.map((recipe) =>
+    files.map((file) => {
+      const { trimmed_alignment, diff, raw } = session.viewAlignment(file, recipe, true);
+      const withoutRaw = session.viewAlignment(file, recipe, false);
+      return {
+        trimmed_alignment,
+        diff,
+        pis_mask: raw.pis_mask,
+        majority_consensus: raw.majority_consensus,
+        raw_left_out_on_request: withoutRaw.raw === undefined,
+      };
+    })
+  );
+  return { summaries, views };
 }
 
 /** Runs the recipes through the desktop engine (src-tauri/examples/engine_summaries.rs). */
-function desktopSummaries(files) {
+function desktopRuns(files) {
   const output = execFileSync(
     'cargo',
     [
@@ -108,26 +123,36 @@ function collectDifferences(desktop, browser, where, differences) {
 
 const differences = [];
 let comparedSummaries = 0;
+let comparedViews = 0;
 for (const dataset of DATASETS) {
   const directory = join(DATA_DIR, dataset);
   const files = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8')).map((name) =>
     join(directory, name)
   );
-  const desktop = desktopSummaries(files);
-  const browser = browserSummaries(files);
+  const desktop = desktopRuns(files);
+  const browser = browserRuns(files);
 
   recipes.forEach((recipe, index) => {
     const label = `${dataset} / ${recipe.name}`;
-    if (desktop[index].length !== browser[index].length) {
+    if (desktop.summaries[index].length !== browser.summaries[index].length) {
       differences.push(
-        `${label}: desktop has ${desktop[index].length} loci, browser has ${browser[index].length}`
+        `${label}: desktop has ${desktop.summaries[index].length} loci, browser has ${browser.summaries[index].length}`
       );
       return;
     }
-    desktop[index].forEach((summary, locus) => {
-      collectDifferences(summary, browser[index][locus], `${label} / ${summary.id}`, differences);
+    desktop.summaries[index].forEach((summary, locus) => {
+      collectDifferences(summary, browser.summaries[index][locus], `${label} / ${summary.id}`, differences);
     });
-    comparedSummaries += desktop[index].length;
+    comparedSummaries += desktop.summaries[index].length;
+    desktop.views[index].forEach((view, locus) => {
+      collectDifferences(
+        { ...view, raw_left_out_on_request: true },
+        browser.views[index][locus],
+        `${label} / view ${basename(files[locus])}`,
+        differences
+      );
+    });
+    comparedViews += desktop.views[index].length;
   });
 }
 
@@ -137,5 +162,5 @@ if (differences.length > 0) {
   process.exit(1);
 }
 console.log(
-  `Engine parity: ${comparedSummaries} locus summaries match (${DATASETS.length} datasets, ${recipes.length} recipes).`
+  `Engine parity: ${comparedSummaries} locus summaries and ${comparedViews} viewer results match (${DATASETS.length} datasets, ${recipes.length} recipes).`
 );

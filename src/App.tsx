@@ -12,8 +12,9 @@ import {
   ViewMode,
 } from './types';
 import {
-  getAlignment,
+  getAlignmentView,
   getPresets,
+  getRetentionDetails,
   exportAlignmentStatsCsv,
   exportFilterConfig,
   isTauri,
@@ -23,7 +24,7 @@ import {
   recalculateCatalog,
   scanDirectory,
 } from './tauriClient';
-import { recipeWithoutOrfAnalysis } from './summaries';
+import { processingRecipeKey, recipeWithoutOrfAnalysis } from './summaries';
 import { DEFAULT_RECIPE } from './defaultRecipe';
 import { Header } from './components/Header';
 import { FilterSidebar } from './components/FilterSidebar';
@@ -48,22 +49,6 @@ import {
 } from 'lucide-react';
 import iconDark from './assets/icon-dark.png';
 import iconLight from './assets/icon-light.png';
-
-function sequenceProcessingRecipeKey(recipe: TrimmingRecipe): string {
-  const processingFields: Partial<TrimmingRecipe> = { ...recipe };
-  delete processingFields.name;
-  delete processingFields.description;
-  delete processingFields.assess_alignment;
-  delete processingFields.min_taxa;
-  delete processingFields.min_taxa_occupancy_percent;
-  delete processingFields.min_length;
-  delete processingFields.max_gap_percent;
-  delete processingFields.min_pis_count;
-  delete processingFields.min_pis_percent;
-  delete processingFields.min_variable_count;
-  delete processingFields.min_variable_percent;
-  return JSON.stringify(processingFields);
-}
 
 function assessmentRecipeKey(recipe: TrimmingRecipe): string {
   return JSON.stringify({
@@ -159,7 +144,6 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isCatalogProcessing, setIsCatalogProcessing] = useState<boolean>(false);
   const [catalogProcessingPercent, setCatalogProcessingPercent] = useState<number>(0);
-  const [referenceRevision, setReferenceRevision] = useState(0);
   const [loadingProgress, setLoadingProgress] = useState<{
     current: number;
     total: number;
@@ -174,18 +158,21 @@ export const App: React.FC = () => {
   const activeRecipeRef = useRef(activeRecipe);
   activeRecipeRef.current = activeRecipe;
   summariesRef.current = summaries;
+  const viewDataRef = useRef(viewData);
+  viewDataRef.current = viewData;
 
-  const processingRecipeKey = sequenceProcessingRecipeKey(activeRecipe);
+  // Computed once per recipe change. App renders on every progress update.
+  const processingKey = useMemo(() => processingRecipeKey(activeRecipe), [activeRecipe]);
   // Hold the recipe identity steady while only assessment thresholds change, so
   // the dataset-wide recalculation does not restart for a gating-only edit.
   // A `useMemo` keyed on the string would have to return `activeRecipe` without
   // listing it as a dependency, which goes stale as soon as a new field is added
-  // to the recipe; comparing the key against the stored recipe cannot.
-  const processingRecipeRef = useRef(activeRecipe);
-  if (sequenceProcessingRecipeKey(processingRecipeRef.current) !== processingRecipeKey) {
-    processingRecipeRef.current = activeRecipe;
+  // to the recipe; comparing the key against the stored one cannot.
+  const processingRecipeRef = useRef({ key: processingKey, recipe: activeRecipe });
+  if (processingRecipeRef.current.key !== processingKey) {
+    processingRecipeRef.current = { key: processingKey, recipe: activeRecipe };
   }
-  const processingRecipe = processingRecipeRef.current;
+  const processingRecipe = processingRecipeRef.current.recipe;
   const viewerProcessingRecipe = useMemo(
     () =>
       msaSidebarContext === 'orf'
@@ -193,7 +180,7 @@ export const App: React.FC = () => {
         : recipeWithoutOrfAnalysis(processingRecipe),
     [msaSidebarContext, processingRecipe]
   );
-  const gatingRecipeKey = assessmentRecipeKey(activeRecipe);
+  const gatingRecipeKey = useMemo(() => assessmentRecipeKey(activeRecipe), [activeRecipe]);
 
   // Initialize presets & Tauri progress event listener
   useEffect(() => {
@@ -242,7 +229,6 @@ export const App: React.FC = () => {
               setSelectedLocusId(first.id);
               setSelectedFilePath(first.file_path);
             }
-            setReferenceRevision((r) => r + 1);
             setIsLoading(false);
             setLoadingProgress(null);
           }).catch((err: unknown) => {
@@ -279,7 +265,7 @@ export const App: React.FC = () => {
     setLoadingProgress({ current: 0, total: 0, percent: 0, fileName: 'Discovering alignment files…' });
     setCurrentPath(dirPath);
     try {
-      const res = await scanDirectory(dirPath);
+      const res = await scanDirectory(dirPath, activeRecipe);
       rawSummariesRef.current = res.summaries;
       setSummaries(res.summaries);
       setOverview(res.overview);
@@ -340,14 +326,11 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSelectLocus = useCallback(
-    (id: string, filePath: string) => {
-      if (selectedFilePath === filePath) return;
-      setSelectedLocusId(id);
-      setSelectedFilePath(filePath);
-    },
-    [selectedFilePath]
-  );
+  // Setting the same values again does not render, so this needs no dependencies.
+  const handleSelectLocus = useCallback((id: string, filePath: string) => {
+    setSelectedLocusId(id);
+    setSelectedFilePath(filePath);
+  }, []);
 
   // Alignment previews are viewer-only. Catalog rows are updated exclusively by the
   // dataset-wide recalculation below, so opening an alignment is never required to
@@ -361,39 +344,67 @@ export const App: React.FC = () => {
     setSelectedFilePath(first.file_path);
   }, [activeView, selectedFilePath, summaries]);
 
+  // A dataset switch clears the view, so no stale alignment stays on screen
+  // while the new directory is indexed.
   useEffect(() => {
-    if (activeView !== 'msa' || !selectedFilePath) {
+    if (activeView !== 'msa' || !selectedFilePath || isLoading) {
       setViewData(null);
       setAlignmentLoadError(null);
       return;
     }
 
-    setViewData(null);
+    // A recipe change keeps the open view until the new one arrives. It waits
+    // as the catalog does, so a slider drag asks for one view, not one per step.
+    // The unprocessed locus does not change with the recipe, so it is not sent again.
+    const sameLocus = viewDataRef.current?.raw_alignment.file_path === selectedFilePath;
+    if (!sameLocus) setViewData(null);
     setAlignmentLoadError(null);
     let isCancelled = false;
     const totalUniqueTaxa = overview.total_unique_taxa || occupancy.length || 0;
-    getAlignment(selectedFilePath, viewerProcessingRecipe, totalUniqueTaxa)
-      .then((data) => {
-        if (!isCancelled) {
-          setViewData(
-            applyCatalogAssessmentToView(
-              data,
-              summariesRef.current.find((summary) => summary.file_path === selectedFilePath)
-            )
-          );
-        }
-      })
-      .catch((err) => {
-        if (!isCancelled) {
-          console.error('Failed to load alignment:', err);
-          setAlignmentLoadError(err instanceof Error ? err.message : String(err));
-        }
-      });
+    const timer = window.setTimeout(
+      () => {
+        getAlignmentView(selectedFilePath, viewerProcessingRecipe, totalUniqueTaxa, !sameLocus)
+          .then((update) => {
+            if (isCancelled) return;
+            setViewData((previous) => {
+              const raw =
+                update.raw ??
+                (previous?.raw_alignment.file_path === selectedFilePath ? previous : null);
+              if (!raw) return previous;
+              return applyCatalogAssessmentToView(
+                {
+                  raw_alignment: raw.raw_alignment,
+                  pis_mask: raw.pis_mask,
+                  majority_consensus: raw.majority_consensus,
+                  trimmed_alignment: update.trimmed_alignment,
+                  diff: update.diff,
+                },
+                summariesRef.current.find((summary) => summary.file_path === selectedFilePath)
+              );
+            });
+          })
+          .catch((err) => {
+            if (!isCancelled) {
+              console.error('Failed to load alignment:', err);
+              setAlignmentLoadError(err instanceof Error ? err.message : String(err));
+            }
+          });
+      },
+      sameLocus ? 150 : 0
+    );
 
     return () => {
       isCancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [activeView, selectedFilePath, viewerProcessingRecipe, overview.total_unique_taxa, occupancy.length]);
+  }, [
+    activeView,
+    selectedFilePath,
+    isLoading,
+    viewerProcessingRecipe,
+    overview.total_unique_taxa,
+    occupancy.length,
+  ]);
 
   // Keep an open preview synchronized to Catalog QC without applying ORF sample
   // loss or ORF candidate failure to the alignment assessment badge.
@@ -458,38 +469,26 @@ export const App: React.FC = () => {
   }, [
     processingRecipe,
     gatingRecipeKey,
-    referenceRevision,
     currentPath,
     isLoading,
     overview.total_unique_taxa,
     occupancy.length,
   ]);
 
-  /*
-   * Keep this state reset close to loading so a dataset switch cannot leave a stale
-   * processing badge behind while the new directory is being indexed.
-   */
-  useEffect(() => {
-    if (isLoading) {
-      setViewData(null);
-    }
-  }, [isLoading]);
-
   useEffect(() => {
     setShowParseFailures(parseFailures.length > 0);
   }, [parseFailures]);
 
   // Only the occupancy chart and the Matrix view need per-sample retention, so
-  // the browser fetches it when one of them opens rather than carrying it on
-  // every recalculation. Desktop summaries already carry it.
+  // it is fetched when one of them opens rather than carried on every
+  // recalculation.
   useEffect(() => {
-    if ((activeView !== 'qc' && activeView !== 'matrix') || isTauri || summaries.length === 0) {
+    if ((activeView !== 'qc' && activeView !== 'matrix') || summaries.length === 0) {
       setRetentionSummaries(null);
       return;
     }
     let cancelled = false;
-    import('./engine/enginePool')
-      .then(({ enginePool }) => enginePool.retentionDetails())
+    getRetentionDetails()
       .then((details) => {
         if (cancelled || details.size === 0) return;
         setRetentionSummaries(
@@ -553,6 +552,20 @@ export const App: React.FC = () => {
     },
     [handleSelectLocus]
   );
+
+  // Stable callbacks, so the memoised catalog list does not render again on
+  // every progress update.
+  const handleSelectCatalogLocus = useCallback(
+    (id: string, filePath: string) => handleSelectLocusAndSwitchView(id, filePath, 'catalog'),
+    [handleSelectLocusAndSwitchView]
+  );
+
+  const handleCatalogSortChange = useCallback((field: CatalogSortField, asc: boolean) => {
+    setCatalogSortField(field);
+    setCatalogSortAsc(asc);
+  }, []);
+
+  const handleExportStats = useCallback(() => exportAlignmentStatsCsv(summaries), [summaries]);
 
   const handleSelectHeaderView = useCallback(
     (view: ViewMode) => {
@@ -876,7 +889,6 @@ export const App: React.FC = () => {
                 const found = recipes.find((r) => r.name === activeRecipe.name);
                 if (found) setActiveRecipe(found);
               }}
-              onReferencesChanged={() => setReferenceRevision((revision) => revision + 1)}
               aminoAcidViewerSettings={aminoAcidViewerSettings}
               onChangeAminoAcidViewerSettings={setAminoAcidViewerSettings}
             />
@@ -919,9 +931,7 @@ export const App: React.FC = () => {
                 isProcessing={isCatalogProcessing}
                 processingPercent={catalogProcessingPercent}
                 selectedLocusId={selectedLocusId}
-                onSelectLocus={(id: string, filePath: string) =>
-                  handleSelectLocusAndSwitchView(id, filePath, 'catalog')
-                }
+                onSelectLocus={handleSelectCatalogLocus}
                 selectedPaths={selectedPaths}
                 onToggleSelectPath={handleToggleSelectPath}
                 onSelectAllPaths={handleSelectAllPaths}
@@ -932,10 +942,7 @@ export const App: React.FC = () => {
                 onStatusFilterChange={setCatalogStatusFilter}
                 sortField={catalogSortField}
                 sortAsc={catalogSortAsc}
-                onSortChange={(field, asc) => {
-                  setCatalogSortField(field);
-                  setCatalogSortAsc(asc);
-                }}
+                onSortChange={handleCatalogSortChange}
                 onVisibleOrderChange={handleVisibleOrderChange}
                 orfEnabled={activeRecipe.enable_orf}
                 orfSearchMode={activeRecipe.orf_search_mode}
@@ -947,9 +954,7 @@ export const App: React.FC = () => {
               <MatrixHeatmap
                 occupancy={occupancy}
                 summaries={retentionSummaries ?? summaries}
-                onSelectLocus={(id: string, filePath: string) =>
-                  handleSelectLocusAndSwitchView(id, filePath, 'catalog')
-                }
+                onSelectLocus={handleSelectCatalogLocus}
               />
             )}
 
@@ -990,7 +995,7 @@ export const App: React.FC = () => {
                 summaries={retentionSummaries ?? summaries}
                 occupancy={occupancy}
                 orfEnabled={activeRecipe.enable_orf}
-                onExportStats={() => exportAlignmentStatsCsv(summaries)}
+                onExportStats={handleExportStats}
               />
             )}
 

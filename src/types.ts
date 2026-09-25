@@ -303,12 +303,32 @@ export interface CatalogUpdateResponse {
   overview: DatasetOverview;
 }
 
-export interface AlignmentViewResponse {
+/** The unprocessed locus in the viewer. It does not change with the recipe. */
+export interface AlignmentRawView {
   raw_alignment: Alignment;
-  trimmed_alignment: Alignment;
-  diff: TrimmingDiff;
   pis_mask: boolean[];
   majority_consensus: string;
+}
+
+export interface AlignmentViewResponse extends AlignmentRawView {
+  trimmed_alignment: Alignment;
+  diff: TrimmingDiff;
+}
+
+/** One viewer request. `raw` is present only when the request asks for it. */
+export interface AlignmentViewUpdate {
+  trimmed_alignment: Alignment;
+  diff: TrimmingDiff;
+  raw?: AlignmentRawView;
+}
+
+/** The samples that a processed locus keeps. Only the QC and Matrix views read them. */
+export interface RetentionDetail {
+  file_path: string;
+  retained_taxa: string[];
+  retained_taxon_basepairs: Record<string, number>;
+  orf_retained_taxa: string[];
+  orf_retained_taxon_basepairs: Record<string, number>;
 }
 
 export interface BatchExportConfig {

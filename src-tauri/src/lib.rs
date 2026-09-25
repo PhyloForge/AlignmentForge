@@ -33,6 +33,7 @@ pub fn run() {
             scan_directory,
             get_alignment,
             recalculate_catalog,
+            get_retention_details,
             run_batch_export,
             run_concatenate,
             run_grouped_concatenate,

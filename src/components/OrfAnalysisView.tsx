@@ -26,6 +26,9 @@ const ROW_HEIGHT = 38;
 const OVERSCAN = 15;
 const COLUMN_COUNT = 13;
 
+// The order of `localeCompare`, without its per-call locale lookup.
+const compareText = new Intl.Collator().compare;
+
 type OrfSortField =
   | 'id'
   | 'candidate'
@@ -126,7 +129,7 @@ const OrfAnalysisView: React.FC<OrfAnalysisViewProps> = ({
       const valA = getSortValue(a);
       const valB = getSortValue(b);
 
-      const comparison = typeof valA === 'string' ? valA.localeCompare(String(valB)) : (valA as number) - (valB as number);
+      const comparison = typeof valA === 'string' ? compareText(valA, String(valB)) : (valA as number) - (valB as number);
       return sortAsc ? comparison : -comparison;
     });
   }, [summaries, searchTerm, statusFilter, sortField, sortAsc, skipNonCodingOrf, orfSearchMode]);

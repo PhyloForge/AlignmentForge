@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+use crate::algorithms::informative::calculate_site_statistics;
+use crate::algorithms::stats::calculate_gap_stats;
 
 fn default_true() -> bool {
     true
@@ -33,6 +37,16 @@ pub struct Alignment {
     pub sequences: Vec<String>,
     pub length: usize,
     pub num_taxa: usize,
+    #[serde(skip)]
+    statistics: OnceLock<AlignmentStatistics>,
+}
+
+/// Gap and site statistics of an alignment.
+#[derive(Debug, Clone, Copy)]
+pub struct AlignmentStatistics {
+    pub gap_percent: f64,
+    pub variable_count: usize,
+    pub pis_count: usize,
 }
 
 impl Alignment {
@@ -55,7 +69,22 @@ impl Alignment {
             sequences,
             length,
             num_taxa,
+            statistics: OnceLock::new(),
         }
+    }
+
+    /// Gap and site statistics of these sequences. Each recipe run reads them
+    /// for the unprocessed alignment, so they are computed once, on first use.
+    pub fn statistics(&self) -> AlignmentStatistics {
+        *self.statistics.get_or_init(|| {
+            let (_, _, gap_percent) = calculate_gap_stats(&self.sequences);
+            let sites = calculate_site_statistics(&self.sequences, true);
+            AlignmentStatistics {
+                gap_percent,
+                variable_count: sites.variable_count,
+                pis_count: sites.pis_count,
+            }
+        })
     }
 }
 

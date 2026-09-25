@@ -39,6 +39,9 @@ export interface CatalogViewProps {
 const ROW_HEIGHT = 38; // px per row
 const OVERSCAN = 15; // extra rows above/below visible viewport
 
+// The order of `localeCompare`, without its per-call locale lookup.
+const compareText = new Intl.Collator().compare;
+
 export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
   summaries,
   isProcessing = false,
@@ -143,8 +146,8 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
       if (valB === undefined || valB === null) valB = -Infinity;
       if (typeof valA === 'string') {
         return sortAsc
-          ? (valA as string).localeCompare(valB as string)
-          : (valB as string).localeCompare(valA as string);
+          ? compareText(valA as string, valB as string)
+          : compareText(valB as string, valA as string);
       }
       if (typeof valA === 'boolean') {
         return sortAsc ? (valA === valB ? 0 : valA ? -1 : 1) : valA === valB ? 0 : valA ? 1 : -1;

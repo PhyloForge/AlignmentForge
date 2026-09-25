@@ -11,7 +11,8 @@ use crate::algorithms::orf::{
 };
 use crate::algorithms::reference::match_reference_to_alignment;
 use crate::algorithms::sanitize::{
-    convert_ambiguous_consensus, remove_gap_only_columns, replace_character,
+    convert_ambiguous_consensus, remove_gap_only_columns, replace_missing_with_gap,
+    AmbiguityStrategy,
 };
 use crate::algorithms::segments::mask_divergent_segments;
 use crate::algorithms::similarity::filter_sample_similarity;
@@ -256,11 +257,7 @@ fn mask_divergent_regions(
 pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_dataset_taxa: usize) -> (Alignment, TrimmingDiff) {
     let old_taxa_count = alignment.num_taxa;
     let old_length = alignment.length;
-
-    let (_, _, old_gap_percent) = calculate_gap_stats(&alignment.sequences);
-    let old_site_stats = calculate_site_statistics(&alignment.sequences, true);
-    let old_variable = old_site_stats.variable_count;
-    let old_pis = old_site_stats.pis_count;
+    let old_statistics = alignment.statistics();
 
     let mut current_taxa = alignment.taxa.clone();
     let mut current_seqs = alignment.sequences.clone();
@@ -321,10 +318,11 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
 
     // Step 1: Character Sanitation. Character conversions happen before sample
     // filtering, but no column is removed until all early sample filters finish.
-    current_seqs = convert_ambiguous_consensus(&current_seqs, recipe.ambiguity_strategy);
+    if recipe.ambiguity_strategy != AmbiguityStrategy::Keep {
+        current_seqs = convert_ambiguous_consensus(&current_seqs, recipe.ambiguity_strategy);
+    }
     if recipe.replace_n_with_gap {
-        current_seqs = replace_character(&current_seqs, 'N', '-');
-        current_seqs = replace_character(&current_seqs, '?', '-');
+        replace_missing_with_gap(&mut current_seqs);
     }
 
     // Step 2: Sample-level filtering. Remove samples before any column-level
@@ -374,20 +372,8 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
         }
     }
 
-    // Preserve every original sample on the sanitized column coordinate system
-    // so the raw overlay can show stops in trimmed regions and ORF-pruned taxa.
-    let raw_orf_taxa = alignment.taxa.clone();
-    let raw_orf_sequences: Vec<String> = alignment
-        .sequences
-        .iter()
-        .map(|sequence| {
-            raw_col_map
-                .iter()
-                .filter_map(|column| sequence.as_bytes().get(*column).copied())
-                .map(char::from)
-                .collect()
-        })
-        .collect();
+    // The sanitized column coordinate system, on which the raw overlay shows
+    // stops in trimmed regions and in ORF-pruned samples.
     let raw_orf_col_map = raw_col_map.clone();
 
     let skip_orf = should_skip_orf_locus(&alignment.id, recipe.orf_search_mode);
@@ -401,10 +387,14 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
 
     // Keep the fully sanitized alignment so the hybrid mode can retry the
     // original region when a matched reference does not yield a usable ORF.
-    let pre_reference_seqs = current_seqs.clone();
-    let pre_reference_raw_col_map = raw_col_map.clone();
-    let pre_reference_column_reasons = column_reasons.clone();
-    let pre_reference_masked_segment_count = all_masked_segments.len();
+    let pre_reference_state = (is_coding_with_orf && allows_reference_fallback).then(|| {
+        (
+            current_seqs.clone(),
+            raw_col_map.clone(),
+            column_reasons.clone(),
+            all_masked_segments.len(),
+        )
+    });
 
     // Optional exact-name reference anchoring. The reference identifies the
     // exon span before coding-specific processing; excluded flanks are retained
@@ -499,24 +489,29 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
         // A hybrid reference search must retry the unsliced alignment. This is
         // deliberately after reference-guided validation, not merely after a
         // failed sequence match, because a good match can still imply a frame
-        // containing premature stops in the samples.
-        let guided_has_internal_stop = detect_stop_codons(
-            &orf_result.taxa,
-            &orf_result.sequences,
-            recipe.genetic_code,
-        )
-        .iter()
-        .any(|stop| !stop.is_terminal);
-        let guided_attempt_failed = !orf_result.found_valid_orf
-            || orf_result.retained_samples == 0
-            || guided_has_internal_stop;
-        if allows_reference_fallback && orf_reference_matched && guided_attempt_failed {
+        // containing premature stops in the samples. The stop scan runs only in
+        // the hybrid mode, where a retry is possible.
+        let fallback_state = pre_reference_state.filter(|_| {
+            orf_reference_matched
+                && (!orf_result.found_valid_orf
+                    || orf_result.retained_samples == 0
+                    || detect_stop_codons(
+                        &orf_result.taxa,
+                        &orf_result.sequences,
+                        recipe.genetic_code,
+                    )
+                    .iter()
+                    .any(|stop| !stop.is_terminal))
+        });
+        if let Some((sanitized_seqs, sanitized_col_map, sanitized_reasons, masked_count)) =
+            fallback_state
+        {
             // The retry can select intron columns, so no exon span is reported.
             reference_exon_span = None;
-            current_seqs = pre_reference_seqs.clone();
-            raw_col_map = pre_reference_raw_col_map.clone();
-            column_reasons = pre_reference_column_reasons.clone();
-            all_masked_segments.truncate(pre_reference_masked_segment_count);
+            current_seqs = sanitized_seqs;
+            raw_col_map = sanitized_col_map;
+            column_reasons = sanitized_reasons;
+            all_masked_segments.truncate(masked_count);
             mask_divergent_regions(
                 recipe,
                 &current_taxa,
@@ -561,8 +556,20 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             }
         }
         if let Some(frame) = orf_frame {
+            // Every original sample, so ORF-pruned samples also show their stops.
+            let raw_orf_sequences: Vec<String> = alignment
+                .sequences
+                .iter()
+                .map(|sequence| {
+                    raw_orf_col_map
+                        .iter()
+                        .filter_map(|column| sequence.as_bytes().get(*column).copied())
+                        .map(char::from)
+                        .collect()
+                })
+                .collect();
             raw_orf_stop_codons = Some(detect_raw_stops_in_selected_frame(
-                &raw_orf_taxa,
+                &alignment.taxa,
                 &raw_orf_sequences,
                 frame,
                 recipe.genetic_code,
@@ -791,11 +798,11 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
         dropped_taxa_reasons,
         stop_codons,
         final_stop_codons,
-        old_gap_percent,
+        old_gap_percent: old_statistics.gap_percent,
         new_gap_percent,
-        old_variable,
+        old_variable: old_statistics.variable_count,
         new_variable,
-        old_pis,
+        old_pis: old_statistics.pis_count,
         new_pis,
         found_valid_orf,
         orf_evaluated,

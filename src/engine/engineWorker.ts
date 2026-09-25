@@ -6,7 +6,6 @@
  * shared between workers and the main thread never runs pipeline work.
  */
 import init, { EngineSession, enginePresets } from '../engine-wasm/engine.js';
-import wasmUrl from '../engine-wasm/engine_bg.wasm?url';
 
 export interface AlignmentInput {
   /** Either the text itself, or a file the worker reads on its own thread. */
@@ -18,28 +17,59 @@ export interface AlignmentInput {
 }
 
 type Request =
+  | { kind: 'init'; module: WebAssembly.Module }
   | { kind: 'load'; requestId: number; alignments: AlignmentInput[] }
   | { kind: 'setDataset'; requestId: number; datasetTaxa: string[][]; totalUniqueTaxa: number }
   | { kind: 'summarize'; requestId: number; recipe: unknown; cacheKey: string }
   | { kind: 'retention'; requestId: number; cacheKey: string }
-  | { kind: 'view'; requestId: number; filePath: string; recipe: unknown }
+  | { kind: 'view'; requestId: number; filePath: string; recipe: unknown; includeRaw: boolean }
   | { kind: 'taxonStats'; requestId: number }
   | { kind: 'presets'; requestId: number };
 
 let ready: Promise<void> | null = null;
 let session: EngineSession | null = null;
 
+// The pool compiles the engine once and sends the module to every worker.
+let receiveEngine: (module: WebAssembly.Module) => void = () => {};
+const engineModule = new Promise<WebAssembly.Module>((resolve) => {
+  receiveEngine = resolve;
+});
+
 function ensureReady(): Promise<void> {
   if (!ready) {
-    ready = init({ module_or_path: wasmUrl }).then(() => {
-      session = new EngineSession();
-    });
+    ready = engineModule
+      .then((module) => init({ module_or_path: module }))
+      .then(() => {
+        session = new EngineSession();
+      });
   }
   return ready;
 }
 
+/** The newest summarize request. An older run stops at its next chunk. */
+let latestSummarize = 0;
+
+// One channel for every yield. Held here, so it stays alive between messages.
+const yieldChannel = new MessageChannel();
+const waitingYields: (() => void)[] = [];
+yieldChannel.port1.onmessage = () => waitingYields.shift()?.();
+
+/** Lets queued messages run, so a newer recipe can reach this worker. */
+function yieldToMessages(): Promise<void> {
+  return new Promise((resolve) => {
+    waitingYields.push(resolve);
+    yieldChannel.port2.postMessage(null);
+  });
+}
+
 self.onmessage = async (event: MessageEvent<Request>) => {
   const request = event.data;
+  if (request.kind === 'init') {
+    receiveEngine(request.module);
+    return;
+  }
+  // Counted before any await, so a run in progress sees it at its next check.
+  const summarizeRun = request.kind === 'summarize' ? ++latestSummarize : 0;
   try {
     await ensureReady();
     if (!session) throw new Error('Engine session was not created');
@@ -98,6 +128,17 @@ self.onmessage = async (event: MessageEvent<Request>) => {
               done: Math.min(total, start + chunk),
               total,
             });
+            // The session holds one run, so a replaced run must stop before it
+            // touches the session again.
+            await yieldToMessages();
+            if (summarizeRun !== latestSummarize) {
+              self.postMessage({
+                requestId: request.requestId,
+                ok: false,
+                error: 'Summaries superseded by a newer recipe',
+              });
+              return;
+            }
           }
         } else {
           self.postMessage({ progressFor: request.requestId, done: total, total });
@@ -118,7 +159,7 @@ self.onmessage = async (event: MessageEvent<Request>) => {
         break;
       }
       case 'view': {
-        const result = session.viewAlignment(request.filePath, request.recipe);
+        const result = session.viewAlignment(request.filePath, request.recipe, request.includeRaw);
         self.postMessage({ requestId: request.requestId, ok: true, result });
         break;
       }

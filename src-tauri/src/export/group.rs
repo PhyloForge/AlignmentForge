@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{Alignment, AlignmentFormat};
@@ -106,14 +107,13 @@ pub fn concatenate_alignments_by_gene(
     std::fs::create_dir_all(&config.output_directory)
         .map_err(|e| format!("Failed to create output directory: {}", e))?;
 
-    let mut total_genes = 0;
-    let mut total_exons_processed = 0;
-
-    let all_raw_alignments: Vec<Alignment> = config
+    // Parse in parallel, then report the first failure in input order.
+    let parsed: Vec<Result<Alignment, String>> = config
         .input_paths
-        .iter()
+        .par_iter()
         .map(|path| parse_alignment(Path::new(path)))
-        .collect::<Result<_, _>>()?;
+        .collect();
+    let all_raw_alignments: Vec<Alignment> = parsed.into_iter().collect::<Result<_, _>>()?;
     let runtime_recipe = if resolved_dataset_taxa.is_none() {
         recipe_with_dataset_sample_filter(recipe, &all_raw_alignments)
     } else {
@@ -127,54 +127,61 @@ pub fn concatenate_alignments_by_gene(
             .len()
     });
 
-    // 3. Process each gene group
-    for (gene, paths) in &gene_to_paths {
-        let raw_alignments: Vec<&Alignment> = paths
-            .iter()
-            .filter_map(|path| all_raw_alignments.iter().find(|alignment| &alignment.file_path == path))
-            .collect();
-            
-        if raw_alignments.is_empty() {
-            continue;
-        }
+    let alignments_by_path: HashMap<&str, &Alignment> = all_raw_alignments
+        .iter()
+        .map(|alignment| (alignment.file_path.as_str(), alignment))
+        .collect();
 
-        let mut passing_alignments = Vec::new();
+    // 3. Process the gene groups in parallel. Each one writes its own files.
+    // Returns the number of exons written for each gene, or `None` for a gene
+    // with no exon to write.
+    let exons_per_gene: Vec<Option<usize>> = gene_to_paths
+        .par_iter()
+        .map(|(gene, paths)| {
+            let passing_alignments: Vec<Alignment> = paths
+                .par_iter()
+                .filter_map(|path| alignments_by_path.get(path.as_str()))
+                .filter_map(|raw| {
+                    let (transformed, diff) =
+                        apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
+                    let exported = (!config.only_passing || diff.pass)
+                        && transformed.length > 0
+                        && !transformed.taxa.is_empty();
+                    exported.then_some(transformed)
+                })
+                .collect();
 
-        for raw in &raw_alignments {
-            let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
-            if (!config.only_passing || diff.pass) && transformed.length > 0 && !transformed.taxa.is_empty() {
-                passing_alignments.push(transformed);
+            if passing_alignments.is_empty() {
+                return Ok(None);
             }
-        }
 
-        if passing_alignments.is_empty() {
-            continue;
-        }
+            let (final_taxa, final_seqs, partitions) = build_supermatrix(&passing_alignments);
+            let out_prefix = Path::new(&config.output_directory).join(gene);
+            let out_prefix_str = out_prefix.to_string_lossy();
+            let supermatrix_path =
+                format!("{}.{}", out_prefix_str, config.output_format.extension());
 
-        let (final_taxa, final_seqs, partitions) = build_supermatrix(&passing_alignments);
-        total_exons_processed += passing_alignments.len();
-        let out_prefix = Path::new(&config.output_directory).join(gene);
-        let out_prefix_str = out_prefix.to_string_lossy();
-        let supermatrix_path = format!("{}.{}", out_prefix_str, config.output_format.extension());
+            write_alignment_atomic(
+                Path::new(&supermatrix_path),
+                &final_taxa,
+                &final_seqs,
+                config.output_format,
+            )
+            .map_err(|error| format!("Failed to write gene alignment '{gene}': {error}"))?;
 
-        write_alignment_atomic(
-            Path::new(&supermatrix_path),
-            &final_taxa,
-            &final_seqs,
-            config.output_format,
-        )
-        .map_err(|error| format!("Failed to write gene alignment '{gene}': {error}"))?;
+            if config.write_raxml_partitions {
+                write_raxml_partitions(&format!("{}_partitions.txt", out_prefix_str), &partitions)?;
+            }
 
-        if config.write_raxml_partitions {
-            write_raxml_partitions(&format!("{}_partitions.txt", out_prefix_str), &partitions)?;
-        }
+            if config.write_nexus_partitions {
+                write_nexus_partitions(&format!("{}_partitions.nex", out_prefix_str), &partitions)?;
+            }
 
-        if config.write_nexus_partitions {
-            write_nexus_partitions(&format!("{}_partitions.nex", out_prefix_str), &partitions)?;
-        }
-
-        total_genes += 1;
-    }
+            Ok(Some(passing_alignments.len()))
+        })
+        .collect::<Result<_, String>>()?;
+    let total_genes = exons_per_gene.iter().flatten().count();
+    let total_exons_processed = exons_per_gene.iter().flatten().sum();
 
     Ok(GroupedConcatenateResult {
         total_genes,
