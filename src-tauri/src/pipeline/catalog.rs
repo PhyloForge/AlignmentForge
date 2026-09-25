@@ -808,16 +808,132 @@ mod tests {
     use crate::models::AlignmentFormat;
 
     #[test]
-    fn test_scan_directory_test_data() {
-        let test_dir = std::path::Path::new("../test_data");
-        if test_dir.exists() {
-            let (summaries, overview, occupancy, _alignments, failures) =
-                scan_alignment_directory(test_dir, None::<fn(usize, usize, &str)>).unwrap();
-            assert!(failures.is_empty(), "unexpected parse failures: {failures:?}");
-            assert!(!summaries.is_empty());
-            assert!(overview.total_alignments >= 4);
-            assert!(!occupancy.is_empty());
+    fn scan_reads_each_format_and_reports_unreadable_files() {
+        let root = std::env::temp_dir().join("alignmentforge_scan_formats_test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("locus1.fa"), ">a\nACGTACGT\n>b\nACGTACGA\n").unwrap();
+        std::fs::write(root.join("locus2.phy"), "2 6\na ACGTAC\nc ACGTAA\n").unwrap();
+        std::fs::write(
+            root.join("locus3.nex"),
+            "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=3 NCHAR=4;\nFORMAT DATATYPE=DNA;\nMATRIX\na ACGT\nb ACGA\nc ACGG\n;\nEND;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("broken.fa"), "ACGT\n>a\nACGT\n").unwrap();
+
+        let (summaries, overview, occupancy, alignments, failures) =
+            scan_alignment_directory(&root, None::<fn(usize, usize, &str)>).unwrap();
+
+        let mut ids: Vec<&str> = summaries.iter().map(|summary| summary.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["locus1", "locus2", "locus3"]);
+        assert_eq!(alignments.len(), 3);
+        assert_eq!(overview.total_alignments, 3);
+        assert_eq!(overview.total_unique_taxa, 3);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].file_name, "broken.fa");
+        let loci_with = |taxon: &str| {
+            occupancy
+                .iter()
+                .find(|entry| entry.taxon_name == taxon)
+                .map_or(0, |entry| entry.present_loci_count)
+        };
+        assert_eq!([loci_with("a"), loci_with("b"), loci_with("c")], [3, 2, 2]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The browser build reads each file as text and applies the pass thresholds
+    /// as a separate step (`wasm_api.rs`). The desktop build reads files from disk
+    /// and assesses each locus in one pass. Both must give the same summaries.
+    #[test]
+    fn browser_and_desktop_paths_give_the_same_summaries() {
+        use crate::parsers::parse_alignment_text;
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir("../public/example_data/all_markers")
+            .expect("the bundled example data is missing")
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "phy"))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty());
+
+        let mut desktop_alignments = Vec::new();
+        let mut browser_alignments = Vec::new();
+        for path in &paths {
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            // The browser names a locus by its file name without the last
+            // extension (src/tauriClient.ts).
+            let id = file_name.rsplit_once('.').map_or(file_name.as_str(), |(stem, _)| stem);
+            let content = std::fs::read_to_string(path).unwrap();
+            let browser =
+                parse_alignment_text(&content, id, &file_name, &path.to_string_lossy()).unwrap();
+            let desktop = parse_alignment(path).unwrap();
+            assert_eq!(
+                serde_json::to_value(&desktop).unwrap(),
+                serde_json::to_value(&browser).unwrap(),
+                "{file_name}"
+            );
+            desktop_alignments.push(desktop);
+            browser_alignments.push(browser);
         }
+        let dataset_taxa: Vec<Vec<String>> =
+            browser_alignments.iter().map(|alignment| alignment.taxa.clone()).collect();
+        let total_unique_taxa = dataset_taxa.iter().flatten().collect::<HashSet<_>>().len();
+
+        let desktop_summaries = |recipe: &TrimmingRecipe| {
+            evaluate_recipe_on_alignments_with_progress(
+                &desktop_alignments,
+                recipe,
+                total_unique_taxa,
+                None::<fn(usize, usize, &str)>,
+            )
+            .0
+        };
+        // The browser measures the loci with one recipe and can apply the pass
+        // thresholds of another recipe to the stored measurements.
+        let browser_summaries = |measured_with: &TrimmingRecipe, assessed_with: &TrimmingRecipe| {
+            let measure = recipe_with_taxon_presence(measured_with, &dataset_taxa);
+            let assess = recipe_with_taxon_presence(assessed_with, &dataset_taxa);
+            browser_alignments
+                .iter()
+                .map(|alignment| {
+                    let measured = summarize_alignment_unassessed(alignment, &measure, total_unique_taxa);
+                    apply_assessment(&measured, &assess, total_unique_taxa)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let default = TrimmingRecipe::default();
+        let with_orf = TrimmingRecipe { enable_orf: true, ..TrimmingRecipe::default() };
+        for recipe in [&default, &TrimmingRecipe::preset_strict(), &with_orf] {
+            assert_eq!(
+                serde_json::to_value(desktop_summaries(recipe)).unwrap(),
+                serde_json::to_value(browser_summaries(recipe, recipe)).unwrap(),
+                "{}",
+                recipe.name
+            );
+        }
+
+        // When only the thresholds change, the browser uses the stored
+        // measurements again (the gating fields of `recipeCacheKey` in
+        // src/engine/enginePool.ts).
+        let mut stricter = default.clone();
+        stricter.min_taxa = 40;
+        stricter.min_taxa_occupancy_percent = 80.0;
+        stricter.min_length = 2000;
+        stricter.max_gap_percent = 30.0;
+        stricter.min_pis_count = 20;
+        stricter.min_pis_percent = 2.0;
+        stricter.min_variable_count = 40;
+        stricter.min_variable_percent = 4.0;
+        let passing = |summaries: &[AlignmentSummary]| summaries.iter().filter(|summary| summary.pass).count();
+        let stricter_desktop = desktop_summaries(&stricter);
+        assert!(passing(&stricter_desktop) < passing(&desktop_summaries(&default)));
+        assert_eq!(
+            serde_json::to_value(&stricter_desktop).unwrap(),
+            serde_json::to_value(browser_summaries(&default, &stricter)).unwrap()
+        );
     }
 
     #[test]

@@ -234,6 +234,20 @@ pub async fn recalculate_catalog(
     .map_err(|e| e.to_string())?
 }
 
+/// Gives an export the dataset context of the loaded folder: the sample
+/// exclusions and the number of unique samples. With no folder loaded, it
+/// returns `None`, and the export reads the context from its own input files.
+fn export_context(cache: &AlignmentCache, recipe: &TrimmingRecipe) -> (TrimmingRecipe, Option<usize>) {
+    let taxon_presence = cache.taxon_presence();
+    if taxon_presence.is_empty() {
+        return (recipe.clone(), None);
+    }
+    (
+        recipe_with_taxon_presence(recipe, &taxon_presence),
+        Some(cache.unique_taxon_count()),
+    )
+}
+
 #[tauri::command]
 pub async fn run_batch_export(
     state: tauri::State<'_, AlignmentCache>,
@@ -243,8 +257,8 @@ pub async fn run_batch_export(
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
       guard_panics("Batch export", move || {
-        let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
-        execute_batch_export(&config, &runtime_recipe, Some(cache.unique_taxon_count()))
+        let (runtime_recipe, dataset_taxa) = export_context(&cache, &recipe);
+        execute_batch_export(&config, &runtime_recipe, dataset_taxa)
       })
     })
         .await
@@ -260,8 +274,8 @@ pub async fn run_concatenate(
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
       guard_panics("Supermatrix assembly", move || {
-        let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
-        concatenate_alignments(&config, &runtime_recipe, Some(cache.unique_taxon_count()))
+        let (runtime_recipe, dataset_taxa) = export_context(&cache, &recipe);
+        concatenate_alignments(&config, &runtime_recipe, dataset_taxa)
       })
     })
         .await
@@ -277,8 +291,8 @@ pub async fn run_grouped_concatenate(
     let cache = state.inner().clone();
     tokio::task::spawn_blocking(move || {
       guard_panics("Gene concatenation", move || {
-        let runtime_recipe = recipe_with_taxon_presence(&recipe, &cache.taxon_presence());
-        concatenate_alignments_by_gene(&config, &runtime_recipe, Some(cache.unique_taxon_count()))
+        let (runtime_recipe, dataset_taxa) = export_context(&cache, &recipe);
+        concatenate_alignments_by_gene(&config, &runtime_recipe, dataset_taxa)
       })
     })
         .await
@@ -416,4 +430,39 @@ pub fn get_presets() -> Vec<TrimmingRecipe> {
         TrimmingRecipe::preset_relaxed_uce(),
         TrimmingRecipe::preset_exon_codon(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_context_comes_from_the_loaded_folder_when_there_is_one() {
+        let recipe = TrimmingRecipe {
+            min_sample_locus_occupancy_percent: 60.0,
+            ..TrimmingRecipe::default()
+        };
+        let cache = AlignmentCache::new();
+
+        let (runtime_recipe, dataset_taxa) = export_context(&cache, &recipe);
+        assert_eq!(dataset_taxa, None);
+        assert!(runtime_recipe.excluded_taxa.is_empty());
+
+        let locus = |id: &str, taxa: [&str; 2]| {
+            Alignment::new(
+                id.to_string(),
+                format!("{id}.fa"),
+                format!("/data/{id}.fa"),
+                AlignmentFormat::Fasta,
+                taxa.iter().map(|taxon| taxon.to_string()).collect(),
+                vec!["ACGT".to_string(); 2],
+            )
+        };
+        cache.store(vec![locus("locus1", ["a", "b"]), locus("locus2", ["a", "c"])]);
+
+        let (runtime_recipe, dataset_taxa) = export_context(&cache, &recipe);
+        assert_eq!(dataset_taxa, Some(3));
+        // b and c are each in 50% of the loci, below the 60% threshold.
+        assert_eq!(runtime_recipe.excluded_taxa, vec!["b", "c"]);
+    }
 }

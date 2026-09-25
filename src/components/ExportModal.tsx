@@ -73,13 +73,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const [saveSummaryCsv, setSaveSummaryCsv] = useState<boolean>(true);
   const [saveRecipeJson, setSaveRecipeJson] = useState<boolean>(true);
+  const hasReferences = Object.keys(recipe.orf_reference_sequences ?? {}).length > 0;
   // Intron export needs the exon span that a reference ORF mode finds.
   const canExportIntrons =
     recipe.enable_orf &&
     recipe.orf_use_references &&
     (recipe.orf_search_mode === 'referenceguided' ||
       recipe.orf_search_mode === 'referencecandidateorf') &&
-    Object.keys(recipe.orf_reference_sequences ?? {}).length > 0;
+    hasReferences;
   const [exportIntrons, setExportIntrons] = useState<boolean>(canExportIntrons);
   const [writeRaxmlPartitions, setWriteRaxmlPartitions] = useState<boolean>(true);
   const [writeNexusPartitions, setWriteNexusPartitions] = useState<boolean>(true);
@@ -270,6 +271,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   {batchResult.summary_csv_path && (
                     <div className="text-[11px] text-blue-400 pt-1">
                       📄 Summary CSV: {batchResult.summary_csv_path}
+                    </div>
+                  )}
+                  {batchResult.recipe_json_path && (
+                    <div className="text-[11px] text-blue-400 pt-1">
+                      📄 Recipe: {batchResult.recipe_json_path}
+                    </div>
+                  )}
+                  {batchResult.reference_fasta_path && (
+                    <div className="text-[11px] text-blue-400 pt-1">
+                      📄 Reference sequences: {batchResult.reference_fasta_path}
                     </div>
                   )}
                   {batchResult.errors.map((failure, index) => (
@@ -527,6 +538,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                       />
                       <span className="text-[#c9d1d9]">
                         Save filter recipe (<code>recipe.json</code>)
+                        {hasReferences && (
+                          <> and reference sequences (<code>recipe_references.fasta</code>)</>
+                        )}
                       </span>
                     </label>
                   </>

@@ -223,6 +223,52 @@ mod tests {
     }
 
     #[test]
+    fn one_alignment_reads_the_same_from_every_format() {
+        use crate::pipeline::engine::apply_recipe;
+        use crate::pipeline::recipe::TrimmingRecipe;
+
+        let fasta = ">Rana_one\nACGTACGT\nACGT\n>Rana_two\nACGTTCGT-CGA\n>Rana_three\nACG?ACGTACRT\n";
+        let sequential_phylip =
+            "3 12\nRana_one ACGTACGT\nACGT\nRana_two ACGTT CGT-C GA\nRana_three ACG?ACGTACRT\n";
+        let interleaved_phylip =
+            "3 12\nRana_one   ACGTAC\nRana_two   ACGTTC\nRana_three ACG?AC\n\nGTACGT\nGT-CGA\nGTACRT\n";
+        // Match characters, a declared gap symbol, a comment, and a quoted name.
+        let nexus = "#NEXUS\n[three frogs]\nBEGIN DATA;\nDIMENSIONS NTAX=3 NCHAR=12;\n\
+            FORMAT DATATYPE=DNA GAP=~ MISSING=? MATCHCHAR=. INTERLEAVE;\nMATRIX\n\
+            Rana_one ACGTAC\nRana_two ....T.\n'Rana_three' ...?..\n\n\
+            Rana_one GTACGT\nRana_two ..~..A\n'Rana_three' ....R.\n;\nEND;\n";
+
+        let read = |content: &str, file_name: &str| {
+            super::parse_alignment_text(content, "locus", file_name, file_name).unwrap()
+        };
+        let expected = read(fasta, "locus.fasta");
+        assert_eq!(expected.taxa, vec!["Rana_one", "Rana_two", "Rana_three"]);
+        assert_eq!(expected.sequences, vec!["ACGTACGTACGT", "ACGTTCGT-CGA", "ACG?ACGTACRT"]);
+
+        let recipe = TrimmingRecipe { trim_coverage: false, ..TrimmingRecipe::default() };
+        let (expected_output, expected_diff) = apply_recipe(&expected, &recipe, 0);
+        assert!(!expected_output.sequences.is_empty());
+
+        for (content, file_name) in [
+            (sequential_phylip, "sequential.phy"),
+            (interleaved_phylip, "interleaved.phy"),
+            (nexus, "locus.nex"),
+        ] {
+            let alignment = read(content, file_name);
+            assert_eq!(alignment.taxa, expected.taxa, "{file_name}");
+            assert_eq!(alignment.sequences, expected.sequences, "{file_name}");
+            // The same matrix gives the same filter outcome, whatever its format.
+            let (output, diff) = apply_recipe(&alignment, &recipe, 0);
+            assert_eq!(output.sequences, expected_output.sequences, "{file_name}");
+            assert_eq!(
+                serde_json::to_value(&diff).unwrap(),
+                serde_json::to_value(&expected_diff).unwrap(),
+                "{file_name}"
+            );
+        }
+    }
+
+    #[test]
     fn example_data_parses_cleanly() {
         let dir = std::path::Path::new("../public/example_data");
         if !dir.exists() {

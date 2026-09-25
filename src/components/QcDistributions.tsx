@@ -1,5 +1,6 @@
 import React from 'react';
 import { AlignmentSummary, DatasetOverview, TaxonOccupancy } from '../types';
+import { DIVERGENCE_NOTE } from '../summaries';
 import {
   Activity,
   BarChart2,
@@ -416,9 +417,9 @@ export const QcDistributions: React.FC<QcDistributionsProps> = React.memo(({
           <div className="mt-0.5 text-[10px] text-[#8b949e]">across current alignments</div>
         </div>
 
-        <div className="rounded-xl border border-[#232833] bg-[#14171d] p-3.5 shadow-sm">
+        <div className="rounded-xl border border-[#232833] bg-[#14171d] p-3.5 shadow-sm" title={DIVERGENCE_NOTE}>
           <div className="flex items-center justify-between text-[11px] text-[#8b949e]">
-            <span>Mean Divergence</span>
+            <span>Mean Divergence (approx.)</span>
             <Activity className="h-4 w-4 text-rose-400" />
           </div>
           <div className="mt-1.5 font-mono text-xl font-bold text-[#dce6ff]">
@@ -679,8 +680,8 @@ export const QcDistributions: React.FC<QcDistributionsProps> = React.memo(({
         {/* 4. Genetic Divergence Distribution */}
         <div className="bg-[#14171d] border border-[#232833] rounded-xl p-5 shadow-sm flex flex-col">
           <div className="flex items-center justify-between mb-4">
-            <span className="font-semibold text-xs text-[#dce6ff] uppercase tracking-wider">
-              Pairwise Divergence from Consensus (%)
+            <span className="font-semibold text-xs text-[#dce6ff] uppercase tracking-wider" title={DIVERGENCE_NOTE}>
+              Approx. Divergence from Consensus (%)
             </span>
             <span className="text-xs font-mono text-[#8b949e]">Paralog Cutoff Monitor</span>
           </div>

@@ -155,6 +155,7 @@ To build the software from source:
 | `npm run lint` | Runs ESLint over the frontend code |
 | `npm test` | Runs the engine test suite |
 | `npm run check:display` | Checks the viewer's codon helpers against the engine |
+| `npm run check:parity` | Compares the browser engine with the desktop engine on the example data |
 | `npm run manifests:check` | Verifies the example manifests are current |
 | `npm run icons` | Rebuilds the desktop icons from `public/logo.svg` (macOS) |
 
@@ -164,6 +165,8 @@ The trimming engine is written once, in Rust, under `src-tauri/src`. The desktop
 application links it directly. The browser runs the same code compiled to
 WebAssembly, spread across Web Workers so the loci are processed in parallel and
 the interface never blocks. The two builds therefore cannot disagree.
+`npm run check:parity` checks this. It runs both builds on the example data and
+compares each locus summary. Run `npm run build:wasm` before it.
 
 `npm run build:wasm` compiles the engine for the browser. `npm run dev` and
 `npm run build` do this for you, so you need the `wasm32-unknown-unknown` Rust

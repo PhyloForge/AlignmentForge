@@ -4,8 +4,9 @@ use std::io::Write;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 
+use crate::export::{write_alignment_atomic, write_atomic};
 use crate::models::{Alignment, AlignmentFormat};
-use crate::parsers::{parse_alignment, write_alignment};
+use crate::parsers::parse_alignment;
 use crate::pipeline::catalog::recipe_with_dataset_sample_filter;
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
@@ -86,28 +87,32 @@ pub fn build_supermatrix(
 
 /// Writes a RAxML-style partition file with one line per locus.
 pub fn write_raxml_partitions(path: &str, partitions: &[LocusPartition]) -> Result<(), String> {
-    let mut file = File::create(path)
-        .map_err(|error| format!("Failed to create RAxML partition file '{path}': {error}"))?;
-    for part in partitions {
-        writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
-            .map_err(|error| format!("Failed to write RAxML partition file '{path}': {error}"))?;
-    }
-    Ok(())
+    write_atomic(Path::new(path), |temporary_path| {
+        let mut file = File::create(temporary_path)
+            .map_err(|error| format!("Failed to create RAxML partition file '{path}': {error}"))?;
+        for part in partitions {
+            writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
+                .map_err(|error| format!("Failed to write RAxML partition file '{path}': {error}"))?;
+        }
+        Ok(())
+    })
 }
 
 /// Writes a NEXUS / IQ-TREE partition file with one CHARSET per locus.
 pub fn write_nexus_partitions(path: &str, partitions: &[LocusPartition]) -> Result<(), String> {
-    let mut file = File::create(path)
-        .map_err(|error| format!("Failed to create NEXUS partition file '{path}': {error}"))?;
-    writeln!(file, "#NEXUS\nBEGIN SETS;")
-        .map_err(|error| format!("Failed to write NEXUS partition file '{path}': {error}"))?;
-    for part in partitions {
-        writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
+    write_atomic(Path::new(path), |temporary_path| {
+        let mut file = File::create(temporary_path)
+            .map_err(|error| format!("Failed to create NEXUS partition file '{path}': {error}"))?;
+        writeln!(file, "#NEXUS\nBEGIN SETS;")
             .map_err(|error| format!("Failed to write NEXUS partition file '{path}': {error}"))?;
-    }
-    writeln!(file, "END;")
-        .map_err(|error| format!("Failed to finish NEXUS partition file '{path}': {error}"))?;
-    Ok(())
+        for part in partitions {
+            writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
+                .map_err(|error| format!("Failed to write NEXUS partition file '{path}': {error}"))?;
+        }
+        writeln!(file, "END;")
+            .map_err(|error| format!("Failed to finish NEXUS partition file '{path}': {error}"))?;
+        Ok(())
+    })
 }
 
 pub fn concatenate_alignments(
@@ -155,8 +160,8 @@ pub fn concatenate_alignments(
     // Write supermatrix
     let out_prefix = &config.output_file_prefix;
     let supermatrix_path = format!("{}.{}", out_prefix, config.output_format.extension());
-    write_alignment(
-        &supermatrix_path,
+    write_alignment_atomic(
+        Path::new(&supermatrix_path),
         &final_taxa,
         &final_seqs,
         config.output_format,
@@ -196,34 +201,58 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn test_concatenate_alignments() {
-        let temp_dir = std::env::temp_dir().join("test_concat_dir");
-        let _ = fs::create_dir_all(&temp_dir);
-        let out_prefix = temp_dir.join("supermatrix");
+    fn concatenation_pads_missing_taxa_and_writes_partitions() {
+        let root = std::env::temp_dir().join("alignmentforge_concatenate_test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("locus1.fa");
+        let second = root.join("locus2.phy");
+        fs::write(&first, ">a\nACGT\n>b\nACGA\n>c\nACGC\n").unwrap();
+        // Taxon b is absent from the second locus.
+        fs::write(&second, "2 3\na TTT\nc GGG\n").unwrap();
 
-        let test_input1 = "../test_data/uce-1002.phy";
-        let test_input2 = "../test_data/uce-1003.fa";
+        let config = ConcatenateConfig {
+            input_paths: vec![
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string(),
+            ],
+            output_file_prefix: root.join("supermatrix").to_string_lossy().to_string(),
+            output_format: AlignmentFormat::Phylip,
+            only_passing: false,
+            write_raxml_partitions: true,
+            write_nexus_partitions: true,
+        };
+        // This test exercises concatenation, so no filter changes the loci.
+        let recipe = TrimmingRecipe {
+            trim_similarity: false,
+            trim_external: false,
+            trim_coverage: false,
+            assess_alignment: false,
+            ..TrimmingRecipe::default()
+        };
 
-        if std::path::Path::new(test_input1).exists() && std::path::Path::new(test_input2).exists() {
-            let config = ConcatenateConfig {
-                input_paths: vec![test_input1.to_string(), test_input2.to_string()],
-                output_file_prefix: out_prefix.to_string_lossy().to_string(),
-                output_format: AlignmentFormat::Phylip,
-                only_passing: false,
-                write_raxml_partitions: true,
-                write_nexus_partitions: true,
-            };
-            // This test exercises concatenation, not sample-filter ordering.
-            let mut recipe = TrimmingRecipe::default();
-            recipe.trim_coverage = false;
-            let res = concatenate_alignments(&config, &recipe, None).unwrap();
+        let result = concatenate_alignments(&config, &recipe, None).unwrap();
 
-            assert_eq!(res.total_loci, 2);
-            assert_eq!(res.total_taxa, 4);
-            assert!(temp_dir.join("supermatrix_partitions.txt").exists());
-            assert!(temp_dir.join("supermatrix_partitions.nex").exists());
-        }
+        assert_eq!(result.total_loci, 2);
+        assert_eq!(result.total_taxa, 3);
+        assert_eq!(result.total_length, 7);
+        let supermatrix = parse_alignment(&result.supermatrix_path).unwrap();
+        assert_eq!(supermatrix.taxa, vec!["a", "b", "c"]);
+        assert_eq!(supermatrix.sequences, vec!["ACGTTTT", "ACGA---", "ACGCGGG"]);
+        assert_eq!(
+            fs::read_to_string(root.join("supermatrix_partitions.txt")).unwrap(),
+            "DNA, locus1 = 1-4\nDNA, locus2 = 5-7\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("supermatrix_partitions.nex")).unwrap(),
+            "#NEXUS\nBEGIN SETS;\n  CHARSET locus1 = 1-4;\n  CHARSET locus2 = 5-7;\nEND;\n"
+        );
+        let leftover_temporary_files = fs::read_dir(&root)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftover_temporary_files, 0);
 
-        let _ = fs::remove_dir_all(temp_dir);
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -142,14 +142,17 @@ pub fn pairwise_distance_to_target(sequences: &[String], target: &str) -> Vec<f6
         .collect()
 }
 
-/// Computes mean pairwise divergence across all sequences to majority consensus
+/// Mean distance of the sequences from their majority consensus. The value is
+/// approximate: with 40 or more sequences, it uses every (n / 20)th sequence,
+/// which is 20 to 30 of them. The consensus uses every sequence. Only the
+/// display and the statistics CSV use this value; no filter reads it.
 pub fn compute_mean_divergence(sequences: &[String]) -> f64 {
     if sequences.len() <= 1 {
         return 0.0;
     }
     let consensus = compute_majority_consensus(sequences, false);
 
-    // If more than 20 sequences, sample up to 20 representative sequences for fast calculation
+    // The sample keeps this display value cheap on large loci (numbers in HANDOFF.md).
     let dists = if sequences.len() > 20 {
         let step = sequences.len() / 20;
         let sample_seqs: Vec<String> = sequences.iter().step_by(step).cloned().collect();

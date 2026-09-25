@@ -40,6 +40,10 @@ export function buildDatasetOverviewFromSummaries(
   };
 }
 
+/** Tooltip for `mean_divergence`. The rule is in `compute_mean_divergence` (stats.rs). */
+export const DIVERGENCE_NOTE =
+  'Approximate value. For a locus with 40 or more samples, it uses 20 to 30 samples at equal intervals.';
+
 /**
  * The ordinary alignment branch used by the catalog and the general export.
  * ORF extraction is a separate outcome and must not change what the catalog

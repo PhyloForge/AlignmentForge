@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { AlignmentSummary, CatalogSortField, OrfSearchMode } from '../types';
 import { shouldSkipOrfLocus } from '../sequenceDisplay';
+import { DIVERGENCE_NOTE } from '../summaries';
 
 export interface CatalogViewProps {
   summaries: AlignmentSummary[];
@@ -335,6 +336,7 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
               <th
                 onClick={() => handleSort('mean_divergence')}
                 className="py-2.5 px-3 cursor-pointer hover:text-[#c9d1d9]"
+                title={DIVERGENCE_NOTE}
               >
                 <div className="flex items-center gap-1">
                   <span>DIVERGENCE</span>

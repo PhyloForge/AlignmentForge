@@ -12,7 +12,8 @@
     "manifests": "node scripts/generate-example-manifests.mjs",
     "manifests:check": "node scripts/generate-example-manifests.mjs --check",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
-    "check": "npm run lint && npm run check:display && npm run build && npm test",
+    "check": "npm run lint && npm run check:display && npm run build && npm test && npm run check:parity",
+    "check:parity": "node scripts/check-engine-parity.mjs",
     "build:wasm": "RUSTFLAGS=\"-C target-feature=+simd128\" wasm-pack build src-tauri --release --target web --out-dir ../src/engine-wasm --out-name engine",
     "check:display": "esbuild scripts/check-display-helpers.ts --bundle --platform=node --format=cjs --outfile=scripts/.display-check.cjs --log-level=warning && node scripts/.display-check.cjs",
     "icons": "node scripts/generate-icons.mjs"

@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::export::write_alignment_atomic;
 use crate::models::{Alignment, AlignmentFormat};
-use crate::parsers::{parse_alignment, write_alignment};
+use crate::parsers::parse_alignment;
 use crate::pipeline::catalog::{
     recipe_with_dataset_sample_filter, recipe_without_orf_analysis,
 };
@@ -62,6 +63,8 @@ pub struct BatchExportResult {
     pub orf_directory_path: Option<String>,
     pub summary_csv_path: Option<String>,
     pub recipe_json_path: Option<String>,
+    /// FASTA file with the recipe's reference sequences, which `recipe.json` leaves out.
+    pub reference_fasta_path: Option<String>,
     pub total_introns_exported: usize,
     pub intron_directory_path: Option<String>,
     pub total_failed: usize,
@@ -93,25 +96,35 @@ struct ExportRecord {
     errors: Vec<BatchExportError>,
 }
 
-fn write_alignment_atomic(
-    path: &Path,
-    taxa: &[String],
-    sequences: &[String],
-    format: AlignmentFormat,
-) -> Result<(), String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("Invalid output path: {}", path.display()))?;
-    let temporary_path = path.with_file_name(format!(".{file_name}.tmp"));
-    if let Err(error) = write_alignment(&temporary_path, taxa, sequences, format) {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error);
+const REFERENCE_FASTA_NAME: &str = "recipe_references.fasta";
+
+/// The contents of `recipe.json`. The recipe does not serialize its reference
+/// sequences, so the record names the FASTA file that holds them.
+#[derive(Serialize)]
+struct RecipeRecord<'a> {
+    #[serde(flatten)]
+    recipe: &'a TrimmingRecipe,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orf_reference_file: Option<&'a str>,
+}
+
+/// Writes the recipe's reference sequences as FASTA, which the ORF sidebar can
+/// load again. Returns `None` when the recipe has no references.
+fn write_reference_fasta(out_dir: &Path, recipe: &TrimmingRecipe) -> Result<Option<PathBuf>, String> {
+    if recipe.orf_reference_sequences.is_empty() {
+        return Ok(None);
     }
-    fs::rename(&temporary_path, path).map_err(|error| {
-        let _ = fs::remove_file(&temporary_path);
-        format!("Failed to finalize {}: {error}", path.display())
-    })
+    let mut references: Vec<(String, String)> = recipe
+        .orf_reference_sequences
+        .iter()
+        .map(|(id, sequence)| (id.clone(), sequence.clone()))
+        .collect();
+    references.sort();
+    let (ids, sequences): (Vec<String>, Vec<String>) = references.into_iter().unzip();
+    let path = out_dir.join(REFERENCE_FASTA_NAME);
+    write_alignment_atomic(&path, &ids, &sequences, AlignmentFormat::Fasta)
+        .map_err(|error| format!("Failed to write reference sequences: {error}"))?;
+    Ok(Some(path))
 }
 
 fn output_path(directory: &Path, alignment: &Alignment, format: AlignmentFormat) -> PathBuf {
@@ -431,16 +444,24 @@ pub fn execute_batch_export(
         None
     };
 
-    // Write recipe JSON
-    let recipe_json_path = if config.save_recipe_json {
+    // Write recipe JSON, and the reference sequences that it names
+    let (recipe_json_path, reference_fasta_path) = if config.save_recipe_json {
+        let reference_path = write_reference_fasta(out_dir, &runtime_recipe)?;
+        let record = RecipeRecord {
+            recipe: &runtime_recipe,
+            orf_reference_file: reference_path.as_ref().map(|_| REFERENCE_FASTA_NAME),
+        };
         let recipe_path = out_dir.join("recipe.json");
-        let json = serde_json::to_string_pretty(&runtime_recipe)
+        let json = serde_json::to_string_pretty(&record)
             .map_err(|error| format!("Failed to serialize export recipe: {error}"))?;
         fs::write(&recipe_path, json)
             .map_err(|error| format!("Failed to write export recipe: {error}"))?;
-        Some(recipe_path.to_string_lossy().to_string())
+        (
+            Some(recipe_path.to_string_lossy().to_string()),
+            reference_path.map(|path| path.to_string_lossy().to_string()),
+        )
     } else {
-        None
+        (None, None)
     };
 
     Ok(BatchExportResult {
@@ -455,6 +476,7 @@ pub fn execute_batch_export(
             .then(|| orf_dir.to_string_lossy().to_string()),
         summary_csv_path,
         recipe_json_path,
+        reference_fasta_path,
         total_introns_exported,
         intron_directory_path: (total_introns_exported > 0)
             .then(|| intron_dir.to_string_lossy().to_string()),
@@ -466,6 +488,7 @@ pub fn execute_batch_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::write_alignment;
 
     #[test]
     fn test_batch_export_folder_name_defaults() {
@@ -546,36 +569,110 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_export() {
-        let temp_dir = std::env::temp_dir().join("test_batch_export_dir");
-        let _ = fs::remove_dir_all(&temp_dir);
+    fn batch_export_writes_alignment_summary_and_recipe() {
+        let root = std::env::temp_dir().join("alignmentforge_batch_export_test");
+        let output = root.join("output");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("locus1.fa");
+        fs::write(&input, ">a\nACGTACGT\n>b\nACGTACGA\n>c\nACGTACGC\n").unwrap();
 
-        let test_input = "../test_data/uce-1001.phy";
-        if std::path::Path::new(test_input).exists() {
-            let config = BatchExportConfig {
-                input_paths: vec![test_input.to_string()],
-                output_directory: temp_dir.to_string_lossy().to_string(),
-                general_alignment_directory_name: "all_alignments".to_string(),
-                orf_alignment_directory_name: "orf_alignments".to_string(),
-                intron_directory_name: "intron_alignments".to_string(),
-                output_format: AlignmentFormat::Phylip,
-                only_passing: false,
-                export_general_alignments: true,
-                export_orf_alignments: false,
-                save_recipe_json: true,
-                save_summary_csv: true,
-                export_introns: false,
-            };
-            let recipe = TrimmingRecipe::default();
-            let res = execute_batch_export(&config, &recipe, None).unwrap();
+        let config = BatchExportConfig {
+            input_paths: vec![input.to_string_lossy().to_string()],
+            output_directory: output.to_string_lossy().to_string(),
+            general_alignment_directory_name: "all_alignments".to_string(),
+            orf_alignment_directory_name: "orf_alignments".to_string(),
+            intron_directory_name: "intron_alignments".to_string(),
+            output_format: AlignmentFormat::Phylip,
+            only_passing: false,
+            export_general_alignments: true,
+            export_orf_alignments: false,
+            save_recipe_json: true,
+            save_summary_csv: true,
+            export_introns: false,
+        };
+        let recipe = TrimmingRecipe {
+            trim_similarity: false,
+            trim_external: false,
+            trim_coverage: false,
+            assess_alignment: false,
+            ..TrimmingRecipe::default()
+        };
 
-            assert_eq!(res.total_processed, 1);
-            assert!(temp_dir.join("all_alignments/uce-1001.phy").exists());
-            assert!(temp_dir.join("alignment-trimming_summary.csv").exists());
-            assert!(temp_dir.join("recipe.json").exists());
-        }
+        let result = execute_batch_export(&config, &recipe, None).unwrap();
 
-        let _ = fs::remove_dir_all(temp_dir);
+        assert_eq!(result.total_processed, 1);
+        assert_eq!(result.total_exported, 1);
+        assert_eq!(result.total_failed, 0);
+        let exported = parse_alignment(output.join("all_alignments/locus1.phy")).unwrap();
+        assert_eq!(exported.taxa, vec!["a", "b", "c"]);
+        assert_eq!(exported.sequences, vec!["ACGTACGT", "ACGTACGA", "ACGTACGC"]);
+
+        let summary = fs::read_to_string(output.join("alignment-trimming_summary.csv")).unwrap();
+        let rows: Vec<&str> = summary.lines().collect();
+        assert_eq!(rows.len(), 2, "{summary}");
+        assert!(rows[0].starts_with("Alignment,CatalogPass,GeneralExported,"), "{summary}");
+        assert!(rows[1].starts_with("locus1,true,true,"), "{summary}");
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(output.join("recipe.json")).unwrap()).unwrap();
+        assert!(saved.get("orf_reference_file").is_none());
+        let saved_recipe: TrimmingRecipe = serde_json::from_value(saved).unwrap();
+        assert_eq!(saved_recipe.name, recipe.name);
+        assert!(!saved_recipe.trim_similarity);
+        assert!(result.reference_fasta_path.is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recipe_json_names_a_fasta_file_with_the_reference_sequences() {
+        let root = std::env::temp_dir().join("alignmentforge_recipe_reference_test");
+        let output = root.join("output");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("exon1.fa");
+        fs::write(&input, ">a\nATGAAATAA\n>b\nATGAAATAA\n").unwrap();
+
+        let config = BatchExportConfig {
+            input_paths: vec![input.to_string_lossy().to_string()],
+            output_directory: output.to_string_lossy().to_string(),
+            general_alignment_directory_name: "all_alignments".to_string(),
+            orf_alignment_directory_name: "orf_alignments".to_string(),
+            intron_directory_name: "intron_alignments".to_string(),
+            output_format: AlignmentFormat::Fasta,
+            only_passing: false,
+            export_general_alignments: true,
+            export_orf_alignments: false,
+            save_recipe_json: true,
+            save_summary_csv: false,
+            export_introns: false,
+        };
+        let recipe = TrimmingRecipe {
+            orf_use_references: true,
+            orf_search_mode: OrfSearchMode::ReferenceGuided,
+            orf_reference_sequences: HashMap::from([
+                ("exon2".to_string(), "ATGCCCCCCTAA".to_string()),
+                ("exon1".to_string(), "ATGAAATAA".to_string()),
+            ]),
+            ..TrimmingRecipe::default()
+        };
+
+        let result = execute_batch_export(&config, &recipe, None).unwrap();
+
+        // Sorted by locus, in the form that the ORF sidebar loads.
+        let reference_path = result.reference_fasta_path.expect("no reference file was written");
+        assert_eq!(
+            fs::read_to_string(&reference_path).unwrap(),
+            ">exon1\nATGAAATAA\n>exon2\nATGCCCCCCTAA\n"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(output.join("recipe.json")).unwrap()).unwrap();
+        assert_eq!(saved["orf_reference_file"], "recipe_references.fasta");
+        assert!(saved.get("orf_reference_sequences").is_none());
+        assert_eq!(saved["orf_search_mode"], "referenceguided");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

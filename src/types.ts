@@ -335,6 +335,7 @@ export interface BatchExportResult {
   orf_directory_path?: string;
   summary_csv_path?: string;
   recipe_json_path?: string;
+  reference_fasta_path?: string;
   total_introns_exported?: number;
   intron_directory_path?: string;
   total_failed: number;

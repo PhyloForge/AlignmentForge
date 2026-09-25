@@ -3,11 +3,12 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{Alignment, AlignmentFormat};
-use crate::parsers::{parse_alignment, write_alignment};
+use crate::parsers::parse_alignment;
 use crate::pipeline::catalog::recipe_with_dataset_sample_filter;
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
 use crate::export::concatenate::{build_supermatrix, write_nexus_partitions, write_raxml_partitions};
+use crate::export::write_alignment_atomic;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupedConcatenateConfig {
@@ -156,8 +157,8 @@ pub fn concatenate_alignments_by_gene(
         let out_prefix_str = out_prefix.to_string_lossy();
         let supermatrix_path = format!("{}.{}", out_prefix_str, config.output_format.extension());
 
-        write_alignment(
-            &supermatrix_path,
+        write_alignment_atomic(
+            Path::new(&supermatrix_path),
             &final_taxa,
             &final_seqs,
             config.output_format,
@@ -197,58 +198,66 @@ mod tests {
     }
 
     #[test]
-    fn test_concatenate_alignments_by_gene() {
-        let temp_dir = std::env::temp_dir().join("test_group_concat_dir");
-        let _ = fs::create_dir_all(&temp_dir);
+    fn grouped_export_writes_one_supermatrix_per_gene() {
+        let root = std::env::temp_dir().join("alignmentforge_grouped_export_test");
+        let output = root.join("output");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
 
-        // 1. Create a mock mapping file
-        let mapping_path = temp_dir.join("mapping.csv");
+        let mapping_path = root.join("mapping.csv");
         let mut map_file = fs::File::create(&mapping_path).unwrap();
         writeln!(map_file, "Exon1,GeneA").unwrap();
         writeln!(map_file, "Exon2,GeneA").unwrap();
         writeln!(map_file, "Exon3,GeneB").unwrap();
 
-        // 2. Mock input alignments
-        let test_input1 = "../test_data/uce-1002.phy";
-        let test_input2 = "../test_data/uce-1003.fa";
-        
-        // We will symlink or copy these into our temp_dir to give them names "Exon1", "Exon2", etc.
-        let exon1_path = temp_dir.join("Exon1.phy");
-        let exon2_path = temp_dir.join("Exon2.fa");
-        let exon3_path = temp_dir.join("Exon3.phy");
+        let exon1_path = root.join("Exon1.fa");
+        let exon2_path = root.join("Exon2.phy");
+        let exon3_path = root.join("Exon3.fa");
+        fs::write(&exon1_path, ">a\nACGT\n>b\nACGA\n").unwrap();
+        fs::write(&exon2_path, "2 3\na TTT\nb TTA\n").unwrap();
+        fs::write(&exon3_path, ">a\nGG\n>b\nGC\n").unwrap();
 
-        if Path::new(test_input1).exists() && Path::new(test_input2).exists() {
-            fs::copy(test_input1, &exon1_path).unwrap();
-            fs::copy(test_input2, &exon2_path).unwrap();
-            fs::copy(test_input1, &exon3_path).unwrap();
+        let config = GroupedConcatenateConfig {
+            input_paths: vec![
+                exon1_path.to_string_lossy().to_string(),
+                exon2_path.to_string_lossy().to_string(),
+                exon3_path.to_string_lossy().to_string(),
+            ],
+            output_directory: output.to_string_lossy().to_string(),
+            gene_mapping_csv_path: mapping_path.to_string_lossy().to_string(),
+            output_format: AlignmentFormat::Phylip,
+            only_passing: false,
+            write_raxml_partitions: true,
+            write_nexus_partitions: false,
+        };
+        // This test exercises the grouping, so no filter changes the loci.
+        let recipe = TrimmingRecipe {
+            trim_similarity: false,
+            trim_external: false,
+            trim_coverage: false,
+            assess_alignment: false,
+            ..TrimmingRecipe::default()
+        };
 
-            let config = GroupedConcatenateConfig {
-                input_paths: vec![
-                    exon1_path.to_string_lossy().to_string(),
-                    exon2_path.to_string_lossy().to_string(),
-                    exon3_path.to_string_lossy().to_string(),
-                ],
-                output_directory: temp_dir.to_string_lossy().to_string(),
-                gene_mapping_csv_path: mapping_path.to_string_lossy().to_string(),
-                output_format: AlignmentFormat::Phylip,
-                only_passing: false,
-                write_raxml_partitions: true,
-                write_nexus_partitions: false,
-            };
+        let result = concatenate_alignments_by_gene(&config, &recipe, None).unwrap();
 
-            let mut recipe = TrimmingRecipe::default();
-            recipe.trim_coverage = false;
+        assert_eq!(result.total_genes, 2);
+        assert_eq!(result.total_exons_processed, 3);
+        let gene_a = parse_alignment(output.join("GeneA.phy")).unwrap();
+        assert_eq!(gene_a.taxa, vec!["a", "b"]);
+        assert_eq!(gene_a.sequences, vec!["ACGTTTT", "ACGATTA"]);
+        let gene_b = parse_alignment(output.join("GeneB.phy")).unwrap();
+        assert_eq!(gene_b.sequences, vec!["GG", "GC"]);
+        assert_eq!(
+            fs::read_to_string(output.join("GeneA_partitions.txt")).unwrap(),
+            "DNA, Exon1 = 1-4\nDNA, Exon2 = 5-7\n"
+        );
+        assert_eq!(
+            fs::read_to_string(output.join("GeneB_partitions.txt")).unwrap(),
+            "DNA, Exon3 = 1-2\n"
+        );
+        assert!(!output.join("GeneA_partitions.nex").exists());
 
-            let res = concatenate_alignments_by_gene(&config, &recipe, None).unwrap();
-            
-            assert_eq!(res.total_genes, 2);
-            assert_eq!(res.total_exons_processed, 3);
-            assert!(temp_dir.join("GeneA.phy").exists());
-            assert!(temp_dir.join("GeneA_partitions.txt").exists());
-            assert!(temp_dir.join("GeneB.phy").exists());
-            assert!(temp_dir.join("GeneB_partitions.txt").exists());
-        }
-
-        let _ = fs::remove_dir_all(temp_dir);
+        let _ = fs::remove_dir_all(root);
     }
 }

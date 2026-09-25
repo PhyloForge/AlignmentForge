@@ -61,6 +61,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -74,6 +82,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Compare the browser engine with the desktop engine
+        run: npm run build:wasm && npm run check:parity
 
       # Reported, not enforced: the engine carries pre-existing style lints that
       # are not worth churning scientific code for. Blocking on new correctness
