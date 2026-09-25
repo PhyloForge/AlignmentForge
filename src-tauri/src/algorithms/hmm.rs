@@ -1,14 +1,14 @@
 use crate::models::MaskedSegment;
 
-/// Port of TAPIR / Profile HMM alignment segment cleaner.
+/// Profile-confidence segment cleaner (the "Profile-Confidence Cleaner" in the app).
 ///
-/// Builds a position-specific Profile HMM model with leave-one-out jackknife
-/// emission probabilities (preventing an aberrant sample from inflating its own match profile).
+/// Builds a position-specific base profile with leave-one-out (jackknife)
+/// counts, so an aberrant sample cannot inflate its own match profile.
 ///
-/// For each sequence, calculates the per-residue posterior match confidence.
-/// A sliding window average of the posterior is computed to prevent random matches
-/// from breaking the contiguous bad segment. Windows whose average confidence falls
-/// below `min_posterior` are masked.
+/// For each sequence, calculates the per-residue match confidence against a
+/// uniform background. A sliding window average of the confidence is computed
+/// to prevent random matches from breaking the contiguous bad segment. Windows
+/// whose average confidence falls below `min_posterior` are masked.
 pub fn clean_with_profile_hmm(
     taxa: &[String],
     sequences: &[String],

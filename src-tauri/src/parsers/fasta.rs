@@ -3,11 +3,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use crate::models::{Alignment, AlignmentFormat};
-use crate::parsers::validate_alignment_shape;
+use crate::parsers::{normalize_sequence_symbols, validate_alignment_shape};
 
-/// High-performance zero-copy byte streaming FASTA parser.
-/// Reads the entire file into memory in a single syscall and parses headers and sequences
-/// without intermediate line allocations.
 /// Turns collected sequence bytes into text, naming the offending record rather
 /// than silently yielding an empty sequence for one bad byte.
 fn decode_sequence(bytes: Vec<u8>, taxon: &str) -> Result<String, String> {
@@ -20,6 +17,8 @@ fn decode_sequence(bytes: Vec<u8>, taxon: &str) -> Result<String, String> {
     })
 }
 
+/// Reads a FASTA file into memory with one read, then parses it with
+/// `parse_fasta_bytes`.
 pub fn parse_fasta<P: AsRef<Path>>(path: P) -> Result<Alignment, String> {
     let path_ref = path.as_ref();
     let content = fs::read(path_ref).map_err(|e| format!("Failed to read FASTA file: {}", e))?;
@@ -120,6 +119,7 @@ pub fn parse_fasta_bytes(
         return Err("No sequences found in FASTA file".to_string());
     }
 
+    normalize_sequence_symbols(&mut sequences);
     validate_alignment_shape(&taxa, &sequences, None, "FASTA")?;
 
     Ok(Alignment::new(

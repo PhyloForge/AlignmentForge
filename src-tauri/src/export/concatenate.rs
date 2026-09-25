@@ -38,13 +38,84 @@ pub struct LocusPartition {
     pub length: usize,
 }
 
+/// Joins the loci into one supermatrix in the given order. Taxa are sorted by
+/// name, and a taxon that is absent from a locus gets gaps for that locus.
+pub fn build_supermatrix(
+    alignments: &[Alignment],
+) -> (Vec<String>, Vec<String>, Vec<LocusPartition>) {
+    // Map each taxon to its string buffer
+    let mut concatenated_seqs: BTreeMap<String, String> = BTreeMap::new();
+    for align in alignments {
+        for taxon in &align.taxa {
+            concatenated_seqs.entry(taxon.clone()).or_default();
+        }
+    }
+
+    let mut partitions = Vec::new();
+    let mut current_offset = 0usize;
+
+    for align in alignments {
+        let locus_len = align.length;
+        partitions.push(LocusPartition {
+            name: align.id.clone(),
+            start: current_offset + 1,
+            end: current_offset + locus_len,
+            length: locus_len,
+        });
+
+        // Fast lookup map for this locus
+        let taxon_seq_map: BTreeMap<&str, &str> = align
+            .taxa
+            .iter()
+            .zip(align.sequences.iter())
+            .map(|(t, s)| (t.as_str(), s.as_str()))
+            .collect();
+
+        let gap_pad = "-".repeat(locus_len);
+        for (taxon, sequence) in concatenated_seqs.iter_mut() {
+            let seq_chunk = taxon_seq_map.get(taxon.as_str()).copied().unwrap_or(&gap_pad);
+            sequence.push_str(seq_chunk);
+        }
+
+        current_offset += locus_len;
+    }
+
+    let (taxa, sequences): (Vec<String>, Vec<String>) = concatenated_seqs.into_iter().unzip();
+    (taxa, sequences, partitions)
+}
+
+/// Writes a RAxML-style partition file with one line per locus.
+pub fn write_raxml_partitions(path: &str, partitions: &[LocusPartition]) -> Result<(), String> {
+    let mut file = File::create(path)
+        .map_err(|error| format!("Failed to create RAxML partition file '{path}': {error}"))?;
+    for part in partitions {
+        writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
+            .map_err(|error| format!("Failed to write RAxML partition file '{path}': {error}"))?;
+    }
+    Ok(())
+}
+
+/// Writes a NEXUS / IQ-TREE partition file with one CHARSET per locus.
+pub fn write_nexus_partitions(path: &str, partitions: &[LocusPartition]) -> Result<(), String> {
+    let mut file = File::create(path)
+        .map_err(|error| format!("Failed to create NEXUS partition file '{path}': {error}"))?;
+    writeln!(file, "#NEXUS\nBEGIN SETS;")
+        .map_err(|error| format!("Failed to write NEXUS partition file '{path}': {error}"))?;
+    for part in partitions {
+        writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
+            .map_err(|error| format!("Failed to write NEXUS partition file '{path}': {error}"))?;
+    }
+    writeln!(file, "END;")
+        .map_err(|error| format!("Failed to finish NEXUS partition file '{path}': {error}"))?;
+    Ok(())
+}
+
 pub fn concatenate_alignments(
     config: &ConcatenateConfig,
     recipe: &TrimmingRecipe,
     resolved_dataset_taxa: Option<usize>,
 ) -> Result<ConcatenateResult, String> {
     let mut passing_alignments = Vec::new();
-    let mut all_taxa_set = BTreeSet::new();
 
     let raw_alignments: Vec<Alignment> = config
         .input_paths
@@ -70,9 +141,6 @@ pub fn concatenate_alignments(
     for raw in &raw_alignments {
         let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
         if (!config.only_passing || diff.pass) && transformed.length > 0 && !transformed.taxa.is_empty() {
-            for taxon in &transformed.taxa {
-                all_taxa_set.insert(taxon.clone());
-            }
             passing_alignments.push(transformed);
         }
     }
@@ -81,51 +149,8 @@ pub fn concatenate_alignments(
         return Err("No passing alignments available for concatenation".to_string());
     }
 
-    let all_taxa: Vec<String> = all_taxa_set.into_iter().collect();
-    let num_taxa = all_taxa.len();
-
-    // Map each taxon to its string buffer
-    let mut concatenated_seqs: BTreeMap<String, String> = BTreeMap::new();
-    for taxon in &all_taxa {
-        concatenated_seqs.insert(taxon.clone(), String::new());
-    }
-
-    let mut partitions = Vec::new();
-    let mut current_offset = 0usize;
-
-    for align in &passing_alignments {
-        let locus_len = align.length;
-        let start_1based = current_offset + 1;
-        let end_1based = current_offset + locus_len;
-
-        partitions.push(LocusPartition {
-            name: align.id.clone(),
-            start: start_1based,
-            end: end_1based,
-            length: locus_len,
-        });
-
-        // Fast lookup map for this locus
-        let taxon_seq_map: BTreeMap<&str, &str> = align
-            .taxa
-            .iter()
-            .zip(align.sequences.iter())
-            .map(|(t, s)| (t.as_str(), s.as_str()))
-            .collect();
-
-        let gap_pad = "-".repeat(locus_len);
-
-        for taxon in &all_taxa {
-            let seq_chunk = taxon_seq_map.get(taxon.as_str()).copied().unwrap_or(&gap_pad);
-            concatenated_seqs.get_mut(taxon).unwrap().push_str(seq_chunk);
-        }
-
-        current_offset += locus_len;
-    }
-
-    let total_length = current_offset;
-    let final_taxa: Vec<String> = concatenated_seqs.keys().cloned().collect();
-    let final_seqs: Vec<String> = concatenated_seqs.values().cloned().collect();
+    let (final_taxa, final_seqs, partitions) = build_supermatrix(&passing_alignments);
+    let total_length: usize = partitions.iter().map(|part| part.length).sum();
 
     // Write supermatrix
     let out_prefix = &config.output_file_prefix;
@@ -140,12 +165,7 @@ pub fn concatenate_alignments(
     // Write RAxML partition file
     let raxml_partition_path = if config.write_raxml_partitions {
         let raxml_path = format!("{}_partitions.txt", out_prefix);
-        let mut file = File::create(&raxml_path)
-            .map_err(|error| format!("Failed to create RAxML partition file: {error}"))?;
-        for part in &partitions {
-            writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
-                .map_err(|error| format!("Failed to write RAxML partition file: {error}"))?;
-        }
+        write_raxml_partitions(&raxml_path, &partitions)?;
         Some(raxml_path)
     } else {
         None
@@ -154,23 +174,14 @@ pub fn concatenate_alignments(
     // Write NEXUS / IQ-TREE partition file
     let nexus_partition_path = if config.write_nexus_partitions {
         let nex_path = format!("{}_partitions.nex", out_prefix);
-        let mut file = File::create(&nex_path)
-            .map_err(|error| format!("Failed to create NEXUS partition file: {error}"))?;
-        writeln!(file, "#NEXUS\nBEGIN SETS;")
-            .map_err(|error| format!("Failed to write NEXUS partition file: {error}"))?;
-        for part in &partitions {
-            writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
-                .map_err(|error| format!("Failed to write NEXUS partition file: {error}"))?;
-        }
-        writeln!(file, "END;")
-            .map_err(|error| format!("Failed to finish NEXUS partition file: {error}"))?;
+        write_nexus_partitions(&nex_path, &partitions)?;
         Some(nex_path)
     } else {
         None
     };
 
     Ok(ConcatenateResult {
-        total_taxa: num_taxa,
+        total_taxa: final_taxa.len(),
         total_length,
         total_loci: passing_alignments.len(),
         supermatrix_path,

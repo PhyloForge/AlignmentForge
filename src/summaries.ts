@@ -50,6 +50,5 @@ export function recipeWithoutOrfAnalysis(recipe: TrimmingRecipe): TrimmingRecipe
     ...recipe,
     enable_orf: false,
     orf_use_references: false,
-    fail_if_no_orf: false,
   };
 }

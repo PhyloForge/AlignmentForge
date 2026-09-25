@@ -151,24 +151,6 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
     commitSampleOccupancy(nextValue);
   };
 
-  const handleToggleOrf = (checked: boolean) => {
-    if (checked) {
-      // Automatically disable column-based filters to protect coding triplet frames
-      onChangeRecipe({
-        ...recipe,
-        enable_orf: true,
-        trim_columns: false,
-        enable_statistical_columns: false,
-        fail_if_no_orf: false,
-      });
-    } else {
-      onChangeRecipe({
-        ...recipe,
-        enable_orf: false,
-      });
-    }
-  };
-
   const passPercent = totalCount > 0 ? ((passedCount / totalCount) * 100).toFixed(1) : '100';
 
   const runConfigAction = async (action: 'export' | 'load') => {
@@ -685,7 +667,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           )}
         </div>
 
-        {/* Display 6: Sliding Window Segment Masking */}
+        {/* Display 6: Fixed-Window Segment Masking */}
         <div
           className="shrink-0 border border-teal-500/30 rounded-lg bg-teal-500/[0.035] overflow-hidden"
           style={{ order: 6 }}
@@ -696,7 +678,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           >
             <div className="flex items-center gap-2">
               <span className="w-5 h-5 rounded flex items-center justify-center text-teal-400"><Scissors className="w-3.5 h-3.5" /></span>
-              <span className="font-semibold text-teal-300">Sliding Window Segment Mask</span>
+              <span className="font-semibold text-teal-300">Fixed-Window Segment Mask</span>
             </div>
             {collapsedSections['segments'] ? (
               <ChevronRight className="w-3.5 h-3.5 text-[#8b949e]" />
@@ -787,7 +769,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                 <input
                   type="checkbox"
                   checked={recipe.enable_orf ?? false}
-                  onChange={(e) => handleToggleOrf(e.target.checked)}
+                  onChange={(e) => update('enable_orf', e.target.checked)}
                   className="rounded bg-[#1f242e] border-[#2d3545] text-emerald-500 focus:ring-0 cursor-pointer"
                 />
               </label>
@@ -1015,6 +997,11 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                     />
                     <span className="text-[#c9d1d9]">Codon-Preserving Frame Snapping</span>
                   </label>
+                  {!recipe.enable_orf && recipe.codon_preserving && (
+                    <div className="text-[10px] text-[#8b949e] mt-0.5">
+                      The edges snap to codons of the input frame, which starts at the first input column. Other column steps can still remove single columns inside the alignment.
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -1099,7 +1086,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           )}
         </div>
 
-        {/* Display 9: Statistical Column Trimming (trimAl & Gblocks) */}
+        {/* Display 9: Statistical Column Trimming (similarity, conserved blocks, entropy) */}
         <div
           className="shrink-0 border border-yellow-500/30 rounded-lg bg-yellow-500/[0.035] overflow-hidden"
           style={{ order: 9 }}
@@ -1151,7 +1138,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                       }
                       className="w-full bg-[#1b2029] border border-[#2d3545] rounded px-2 py-1 text-xs text-[#c9d1d9] outline-none"
                     >
-                      <option value="trimalsimilarity">trimAl Similarity & Consistency</option>
+                      <option value="trimalsimilarity">AlignmentForge Column Similarity</option>
                       <option value="gblocksblocks">AlignmentForge Conserved Blocks</option>
                       <option value="entropy">Shannon Information Entropy</option>
                     </select>
@@ -1160,7 +1147,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                   {recipe.stat_col_method === 'trimalsimilarity' && (
                     <>
                       <div>
-                        <label className="text-[11px] text-[#8b949e] block mb-1">trimAl Mode / Heuristic</label>
+                        <label className="text-[11px] text-[#8b949e] block mb-1">Similarity Heuristic</label>
                         <select
                           value={recipe.stat_col_heuristic || 'custom'}
                           onChange={(e) =>
@@ -1170,8 +1157,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
                         >
                           <option value="custom">Custom Similarity Cutoff</option>
                           <option value="gappyout">AlignmentForge Similarity and Gap Heuristic</option>
-                          <option value="strict">trimAl Strict</option>
-                          <option value="strictplus">trimAl StrictPlus (High Conservation)</option>
+                          <option value="strict">Strict Similarity and Gap Heuristic</option>
+                          <option value="strictplus">Strict Plus Similarity and Gap Heuristic (High Conservation)</option>
                         </select>
                       </div>
 

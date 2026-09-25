@@ -26,7 +26,7 @@ fn section_comment(key: &str) -> Option<&'static str> {
         ),
         "trim_similarity" => Some("# Paralog / divergence pruning"),
         "trim_hmm" => Some("# AlignmentForge profile-confidence cleaner"),
-        "trim_segments" => Some("# Sliding-window segment masking"),
+        "trim_segments" => Some("# Fixed-window segment masking"),
         "enable_orf" => Some(
             "# Candidate open reading frame extraction / codon optimization\n# orf_search_mode: continuouscds | bestsharedsegment | referenceguided | referencecandidateorf\n# stop_codon_action: removesample | maskcodon | keep\n# genetic_code: standard | vertebratemitochondrial | invertebratemitochondrial\n# bestsharedsegment uses shared stop-free length plus an internal protein-profile coding score\n# referencecandidateorf tries a matched reference first, then candidate extraction\n# UCE and explicitly non-coding IDs remain skipped",
         ),
@@ -153,11 +153,6 @@ pub fn serialize_filter_config(recipe: &TrimmingRecipe) -> Result<String, String
     }
 
     Ok(output)
-}
-
-/// True when saving this recipe would leave reference sequences behind.
-pub fn drops_reference_sequences(recipe: &TrimmingRecipe) -> bool {
-    !recipe.orf_reference_sequences.is_empty()
 }
 
 pub fn parse_filter_config(contents: &str) -> Result<TrimmingRecipe, String> {

@@ -9,9 +9,9 @@ AlignmentForge is an interactive visual software tool for exploring, filtering, 
 ## Interfaces
 
 <p align="center">
-  <img src="public/screenshot_2.png" alt="General Catalog" width="48%">
+  <img src="src/assets/screenshot_2.png" alt="General Catalog" width="48%">
   &nbsp;
-  <img src="public/screenshot_1.png" alt="Sequence Alignment" width="48%">
+  <img src="src/assets/screenshot_1.png" alt="Sequence Alignment" width="48%">
 </p>
 <p align="center">
   <em>Left: The General Catalog interface displaying an overview of sequences and projects. Right: The detailed Sequence Alignment view showing the nucleotide matrix.</em>
@@ -104,16 +104,27 @@ AlignmentForge reads these file types:
 
 | Format | Extensions |
 |---|---|
-| FASTA | `.fa`, `.fasta`, `.fna`, `.ffn`, `.faa` |
+| FASTA | `.fa`, `.fasta`, `.fna`, `.ffn` |
 | PHYLIP | `.phy`, `.phylip` |
 | NEXUS | `.nex`, `.nexus` |
 | Detected from content | `.aln`, `.txt` |
 
-PHYLIP files can be sequential or interleaved. AlignmentForge searches the
-selected folder and up to four levels of subfolders.
+PHYLIP and NEXUS files can be sequential or interleaved. AlignmentForge
+searches the selected folder and up to three levels of subfolders. It skips
+hidden folders and files, and folders named `node_modules`, `target`, and
+`__MACOSX`.
 
 Every sequence in an alignment must have the same length. AlignmentForge
 reports a file it cannot read and continues with the rest of the folder.
+
+AlignmentForge reads nucleotide alignments only. It changes these symbols
+when it reads a file:
+
+- `.` and `*` become `-` (gap).
+- `X` becomes `N` (unknown base).
+
+A NEXUS file can declare its own GAP, MISSING, and MATCHCHAR symbols.
+AlignmentForge reads those symbols first.
 
 After you select a directory, the application scans it, calculates summary
 statistics, and shows a visual catalog of all your loci. You can then apply

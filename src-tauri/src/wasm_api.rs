@@ -4,7 +4,6 @@
 //! WebAssembly. Each call takes an alignment as text and returns JSON, so a
 //! worker can own a shard of the dataset without sharing Rust state.
 
-use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::models::Alignment;
@@ -16,7 +15,6 @@ use crate::pipeline::catalog::{
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
 
-/// Parsed alignments held for the lifetime of a worker, keyed by file path.
 /// A previously computed shard result, kept so that toggling a filter back to
 /// an earlier setting returns immediately instead of recomputing every locus.
 struct CachedRun {
@@ -26,6 +24,7 @@ struct CachedRun {
 
 #[wasm_bindgen]
 pub struct EngineSession {
+    /// Parsed alignments held for the lifetime of a worker, in load order.
     alignments: Vec<Alignment>,
     /// Measured loci accumulated by the current run, before gating is applied.
     pending: Vec<UnassessedSummary>,
@@ -89,16 +88,6 @@ impl EngineSession {
         self.alignments.len()
     }
 
-    #[wasm_bindgen(js_name = clear)]
-    pub fn clear(&mut self) {
-        self.alignments.clear();
-        self.dataset_taxa.clear();
-        self.pending.clear();
-        self.cache.clear();
-        self.runtime_recipe = None;
-        self.total_unique_taxa = 0;
-    }
-
     /// Records the dataset-wide taxon lists once, after every shard has loaded.
     #[wasm_bindgen(js_name = setDataset)]
     pub fn set_dataset(
@@ -148,15 +137,12 @@ impl EngineSession {
         Ok(())
     }
 
-    /// Hands back the run's summaries, serialised once.
+    /// Applies the thresholds and returns the run's summaries.
     ///
-    /// The per-sample retention lists are dropped here because only the QC
-    /// occupancy chart needs them, and carrying them on every recipe change
-    /// copies a taxon list for every locus across the worker boundary.
-    /// Applies the thresholds and hands back the run's summaries.
-    ///
-    /// Gating runs here rather than during the pipeline, so a change to a pass
-    /// threshold reuses the measured loci and only re-decides pass and fail.
+    /// Gating runs here, not in the pipeline. When only a pass threshold
+    /// changes, the measured loci are used again and only pass and fail change.
+    /// The result does not include the per-sample retention lists, because only
+    /// the QC occupancy chart uses them.
     #[wasm_bindgen(js_name = summarizeFinish)]
     pub fn summarize_finish(&mut self, cache_key: &str) -> Result<JsValue, JsValue> {
         let recipe = self

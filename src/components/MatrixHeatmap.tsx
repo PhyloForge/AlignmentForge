@@ -1,11 +1,19 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { TaxonOccupancy, AlignmentSummary } from '../types';
-import { Grid, HelpCircle } from 'lucide-react';
+import { Grid } from 'lucide-react';
 
 interface MatrixHeatmapProps {
   occupancy: TaxonOccupancy[];
   summaries: AlignmentSummary[];
   onSelectLocus: (id: string, filePath: string) => void;
+}
+
+/** Missing-data percent of one sample in a processed locus, or null when the sample is absent. */
+function sampleMissingPercent(summary: AlignmentSummary, taxon: string): number | null {
+  const basepairs = summary.retained_taxon_basepairs?.[taxon];
+  if (basepairs === undefined) return null;
+  if (summary.length <= 0) return 100;
+  return 100 * (1 - basepairs / summary.length);
 }
 
 export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
@@ -18,21 +26,43 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
 
   const [scrollX, setScrollX] = useState(0);
   const [scrollY, setScrollY] = useState(0);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [hoverInfo, setHoverInfo] = useState<{
     taxon: string;
     locusId: string;
     locusLength: number;
-    gapPercent: number;
+    missingPercent: number | null;
     screenX: number;
     screenY: number;
   } | null>(null);
 
   const numTaxa = occupancy.length;
   const numLoci = summaries.length;
+  const hasData = numTaxa > 0 && numLoci > 0;
+  // The browser build fetches the per-sample lists for this view, so they can
+  // arrive after the summaries. A locus with samples but no list is not loaded.
+  const sampleDataReady = useMemo(
+    () =>
+      summaries.every(
+        (summary) => summary.num_taxa === 0 || (summary.retained_taxa?.length ?? 0) > 0
+      ),
+    [summaries]
+  );
 
   const cellWidth = 4; // px per locus column
   const cellHeight = 16; // px per taxon row
   const leftTaxaWidth = 160;
+
+  // Redraw when the window or the layout changes the canvas size.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => {
+      setCanvasSize({ width: canvas.clientWidth, height: canvas.clientHeight });
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [hasData]);
 
   // Render Canvas
   useEffect(() => {
@@ -53,7 +83,7 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
     ctx.fillStyle = '#0e1014';
     ctx.fillRect(0, 0, width, height);
 
-    if (numTaxa === 0 || numLoci === 0) return;
+    if (!hasData) return;
 
     const startCol = Math.max(0, Math.floor(scrollX / cellWidth));
     const endCol = Math.min(numLoci, startCol + Math.ceil((width - leftTaxaWidth) / cellWidth) + 1);
@@ -61,30 +91,28 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
     const startRow = Math.max(0, Math.floor(scrollY / cellHeight));
     const endRow = Math.min(numTaxa, startRow + Math.ceil(height / cellHeight) + 1);
 
-    // Draw Heatmap Cells
-    for (let r = startRow; r < endRow; r++) {
-      const y = r * cellHeight - scrollY;
+    // Draw Heatmap Cells: each sample's missing data in each processed locus
+    if (sampleDataReady) {
+      for (let r = startRow; r < endRow; r++) {
+        const y = r * cellHeight - scrollY;
+        const taxon = occupancy[r].taxon_name;
 
-      for (let c = startCol; c < endCol; c++) {
-        const x = leftTaxaWidth + c * cellWidth - scrollX;
-        const locus = summaries[c];
+        for (let c = startCol; c < endCol; c++) {
+          const x = leftTaxaWidth + c * cellWidth - scrollX;
+          const missingPercent = sampleMissingPercent(summaries[c], taxon);
 
-        // Fast hash-based presence simulation for matrix completeness
-        const isPresent = (r + c * 7) % 19 !== 0;
-
-        if (isPresent) {
-          if (locus.gap_percent < 20) {
+          if (missingPercent === null) {
+            ctx.fillStyle = '#1f242e'; // absent
+          } else if (missingPercent < 20) {
             ctx.fillStyle = '#10b981'; // green
-          } else if (locus.gap_percent < 50) {
+          } else if (missingPercent < 50) {
             ctx.fillStyle = '#f59e0b'; // amber
           } else {
             ctx.fillStyle = '#ef4444'; // rose
           }
-        } else {
-          ctx.fillStyle = '#1f242e'; // missing
-        }
 
-        ctx.fillRect(x, y, cellWidth - 0.5, cellHeight - 1);
+          ctx.fillRect(x, y, cellWidth - 0.5, cellHeight - 1);
+        }
       }
     }
 
@@ -112,16 +140,24 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
         y + cellHeight / 2
       );
     }
-  }, [occupancy, summaries, scrollX, scrollY, numTaxa, numLoci]);
+  }, [occupancy, summaries, scrollX, scrollY, numTaxa, numLoci, hasData, sampleDataReady, canvasSize]);
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const maxScrollX = Math.max(0, numLoci * cellWidth - (containerRef.current?.clientWidth || 0) + leftTaxaWidth);
-    const maxScrollY = Math.max(0, numTaxa * cellHeight - (containerRef.current?.clientHeight || 0));
+  // React registers wheel listeners as passive, where preventDefault has no
+  // effect, so the matrix scroll uses a native listener.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const maxScrollX = Math.max(0, numLoci * cellWidth - container.clientWidth + leftTaxaWidth);
+      const maxScrollY = Math.max(0, numTaxa * cellHeight - container.clientHeight);
 
-    setScrollX((prev) => Math.max(0, Math.min(maxScrollX, prev + e.deltaX)));
-    setScrollY((prev) => Math.max(0, Math.min(maxScrollY, prev + e.deltaY)));
-  };
+      setScrollX((prev) => Math.max(0, Math.min(maxScrollX, prev + e.deltaX)));
+      setScrollY((prev) => Math.max(0, Math.min(maxScrollY, prev + e.deltaY)));
+    };
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => container.removeEventListener('wheel', handleWheel);
+  }, [numLoci, numTaxa]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -138,14 +174,14 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
     const col = Math.floor((mouseX - leftTaxaWidth + scrollX) / cellWidth);
     const row = Math.floor((mouseY + scrollY) / cellHeight);
 
-    if (col >= 0 && col < numLoci && row >= 0 && row < numTaxa) {
+    if (sampleDataReady && col >= 0 && col < numLoci && row >= 0 && row < numTaxa) {
       const taxon = occupancy[row];
       const locus = summaries[col];
       setHoverInfo({
         taxon: taxon.taxon_name,
         locusId: locus.id,
         locusLength: locus.length,
-        gapPercent: locus.gap_percent,
+        missingPercent: sampleMissingPercent(locus, taxon.taxon_name),
         screenX: e.clientX,
         screenY: e.clientY,
       });
@@ -188,28 +224,29 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
         </div>
 
         <div className="flex items-center gap-3 text-[11px] text-[#8b949e]">
+          {!sampleDataReady && <span className="text-cyan-400">Loading per-sample data…</span>}
           <div className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
-            <span>Present (&lt;20% Gap)</span>
+            <span>Present (&lt;20% missing)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" />
-            <span>Present (20-50% Gap)</span>
+            <span>Present (20-50% missing)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block" />
-            <span>High Gap (&gt;50%)</span>
+            <span>Present (&gt;50% missing)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-sm bg-[#1f242e] inline-block" />
-            <span>Missing</span>
+            <span>Absent</span>
           </div>
         </div>
       </div>
 
       {/* Main Occupancy Split View */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Taxa Occupancy Ranking Table (Virtualized Window) */}
+        {/* Left: Taxa Occupancy Ranking Table (renders every row in a scrolling list) */}
         <div className="w-80 border-r border-[#232833] bg-[#14171d] flex flex-col overflow-hidden flex-none">
           <div className="p-2.5 bg-[#171b22] border-b border-[#232833] text-xs font-semibold text-[#8b949e] font-mono">
             TAXON OCCUPANCY RANKING
@@ -253,7 +290,6 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
         {/* Right: High-Performance Canvas Matrix Heatmap */}
         <div
           ref={containerRef}
-          onWheel={handleWheel}
           className="flex-1 relative overflow-hidden bg-[#0e1014] cursor-pointer"
         >
           <canvas
@@ -276,7 +312,10 @@ export const MatrixHeatmap: React.FC<MatrixHeatmapProps> = ({
               <div className="font-semibold text-[#dce6ff] font-mono">{hoverInfo.locusId}</div>
               <div className="text-[11px] text-[#8b949e]">Taxon: {hoverInfo.taxon}</div>
               <div className="text-[11px] text-[#8b949e]">
-                Length: {hoverInfo.locusLength} bp | Gap: {hoverInfo.gapPercent}%
+                Length: {hoverInfo.locusLength} bp |{' '}
+                {hoverInfo.missingPercent === null
+                  ? 'Sample absent'
+                  : `Missing: ${hoverInfo.missingPercent.toFixed(1)}%`}
               </div>
               <div className="text-[10px] text-cyan-400 pt-0.5">Click to inspect in MSA viewer</div>
             </div>

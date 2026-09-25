@@ -24,8 +24,7 @@ type Request =
   | { kind: 'retention'; requestId: number; cacheKey: string }
   | { kind: 'view'; requestId: number; filePath: string; recipe: unknown }
   | { kind: 'taxonStats'; requestId: number }
-  | { kind: 'presets'; requestId: number }
-  | { kind: 'clear'; requestId: number };
+  | { kind: 'presets'; requestId: number };
 
 let ready: Promise<void> | null = null;
 let session: EngineSession | null = null;
@@ -134,11 +133,6 @@ self.onmessage = async (event: MessageEvent<Request>) => {
       }
       case 'presets': {
         self.postMessage({ requestId: request.requestId, ok: true, result: enginePresets() });
-        break;
-      }
-      case 'clear': {
-        session.clear();
-        self.postMessage({ requestId: request.requestId, ok: true, result: null });
         break;
       }
     }

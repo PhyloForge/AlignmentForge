@@ -79,9 +79,12 @@ fn map_masked_segments_to_raw(
         let Some(columns) = raw_col_map.get(segment.start..segment.end) else {
             continue;
         };
+        // A reverse-strand ORF reverses the map, so sort before building runs.
+        let mut columns = columns.to_vec();
+        columns.sort_unstable();
         let mut run_start = None;
         let mut previous = None;
-        for &raw_column in columns {
+        for raw_column in columns {
             if previous.is_some_and(|value| raw_column != value + 1) {
                 mapped_segments.push(MaskedSegment {
                     taxon: segment.taxon.clone(),
@@ -103,6 +106,30 @@ fn map_masked_segments_to_raw(
         }
     }
     mapped_segments
+}
+
+/// Removes the dropped local columns from `raw_col_map` and records the
+/// reason for each removed raw column.
+fn remove_mapped_columns(
+    raw_col_map: &mut Vec<usize>,
+    column_reasons: &mut HashMap<usize, String>,
+    dropped_local_cols: &[usize],
+    reason: impl Fn(usize) -> String,
+) {
+    let mut kept_mask = vec![true; raw_col_map.len()];
+    for &local_col in dropped_local_cols {
+        if let Some(&raw_col) = raw_col_map.get(local_col) {
+            kept_mask[local_col] = false;
+            column_reasons.insert(raw_col, reason(local_col));
+        }
+    }
+    let mut kept_columns = Vec::with_capacity(raw_col_map.len());
+    for (local_col, &raw_col) in raw_col_map.iter().enumerate() {
+        if kept_mask[local_col] {
+            kept_columns.push(raw_col);
+        }
+    }
+    *raw_col_map = kept_columns;
 }
 
 fn detect_raw_stops_in_selected_frame(
@@ -177,6 +204,53 @@ fn detect_raw_stops_in_selected_frame(
     stops
 }
 
+/// Masks divergent regions in each sample, then removes the columns that the
+/// masks leave with no data.
+fn mask_divergent_regions(
+    recipe: &TrimmingRecipe,
+    taxa: &[String],
+    sequences: &mut Vec<String>,
+    raw_col_map: &mut Vec<usize>,
+    column_reasons: &mut HashMap<usize, String>,
+    masked_segments: &mut Vec<MaskedSegment>,
+) {
+    // Step 3a: Profile-confidence segment cleaner
+    if recipe.trim_hmm && sequences.len() > 2 {
+        let (hmm_seqs, segments) = clean_with_profile_hmm(
+            taxa,
+            sequences,
+            recipe.hmm_min_posterior,
+            recipe.hmm_min_segment_length,
+            recipe.hmm_min_island_length,
+        );
+        masked_segments.extend(map_masked_segments_to_raw(segments, raw_col_map));
+        *sequences = hmm_seqs;
+    }
+
+    // Step 3b: Divergent segment masking in fixed, non-overlapping windows
+    if recipe.trim_segments && sequences.len() > 2 {
+        let (masked_seqs, segments) = mask_divergent_segments(
+            taxa,
+            sequences,
+            recipe.segment_window_size,
+            recipe.segment_threshold,
+        );
+        masked_segments.extend(map_masked_segments_to_raw(segments, raw_col_map));
+        *sequences = masked_seqs;
+    }
+
+    // Step 3c: Remove the gap-only columns that the masks created
+    if recipe.remove_gap_only_columns && !sequences.is_empty() {
+        let (cleaned_seqs, dropped_columns) = remove_gap_only_columns(sequences);
+        if !dropped_columns.is_empty() {
+            remove_mapped_columns(raw_col_map, column_reasons, &dropped_columns, |_| {
+                "Column masked completely by sequence trimming".to_string()
+            });
+            *sequences = cleaned_seqs;
+        }
+    }
+}
+
 /// Executes a non-destructive TrimmingRecipe against an Alignment.
 /// Returns the transformed Alignment and the TrimmingDiff describing changes.
 pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_dataset_taxa: usize) -> (Alignment, TrimmingDiff) {
@@ -214,6 +288,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     let mut orf_reference_identity = 0.0;
     let mut orf_reference_coverage = 0.0;
     let mut orf_intron_length = 0usize;
+    let mut reference_exon_span: Option<(usize, usize)> = None;
     let mut reference_frame_hint = None;
     let mut raw_orf_stop_codons: Option<Vec<StopCodonPos>> = None;
 
@@ -292,22 +367,9 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     if recipe.remove_gap_only_columns && !current_seqs.is_empty() {
         let (cleaned_seqs, dropped_columns) = remove_gap_only_columns(&current_seqs);
         if !dropped_columns.is_empty() {
-            let dropped_set: HashSet<usize> = dropped_columns.iter().copied().collect();
-            for local_column in &dropped_columns {
-                if let Some(raw_column) = raw_col_map.get(*local_column) {
-                    column_reasons.insert(
-                        *raw_column,
-                        "Gap-Only / Missing-Only Sanitation".to_string(),
-                    );
-                }
-            }
-            raw_col_map = raw_col_map
-                .into_iter()
-                .enumerate()
-                .filter_map(|(local_column, raw_column)| {
-                    (!dropped_set.contains(&local_column)).then_some(raw_column)
-                })
-                .collect();
+            remove_mapped_columns(&mut raw_col_map, &mut column_reasons, &dropped_columns, |_| {
+                "Gap-Only / Missing-Only Sanitation".to_string()
+            });
             current_seqs = cleaned_seqs;
         }
     }
@@ -359,6 +421,7 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
                     orf_reference_identity = reference_match.identity_percent;
                     orf_reference_coverage = reference_match.coverage_percent;
                     orf_intron_length = current_length.saturating_sub(end - start);
+                    reference_exon_span = Some((raw_col_map[start], raw_col_map[end - 1] + 1));
                     let reference_frame =
                         find_optimal_reading_frame(&[reference.clone()], recipe.genetic_code).frame;
                     reference_frame_hint = Some(if reference_match.is_reverse {
@@ -388,56 +451,15 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
         }
     }
 
-    // Step 3a: Profile HMM Segment Cleaner (TAPIR-Style)
-    if recipe.trim_hmm && current_seqs.len() > 2 {
-        let (hmm_seqs, segments) = clean_with_profile_hmm(
-            &current_taxa,
-            &current_seqs,
-            recipe.hmm_min_posterior,
-            recipe.hmm_min_segment_length,
-            recipe.hmm_min_island_length,
-        );
-        all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
-        current_seqs = hmm_seqs;
-    }
-
-    // Step 3b: Sliding Window Segment Masking
-    if recipe.trim_segments && current_seqs.len() > 2 {
-        let (masked_seqs, segments) = mask_divergent_segments(
-            &current_taxa,
-            &current_seqs,
-            recipe.segment_window_size,
-            recipe.segment_threshold,
-        );
-        all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
-        current_seqs = masked_seqs;
-    }
-
-
-    // Step 3c: Clean gap-only columns created by HMM or Segment masking
-    if recipe.remove_gap_only_columns && !current_seqs.is_empty() {
-        let (cleaned_seqs, dropped_columns) = remove_gap_only_columns(&current_seqs);
-        if !dropped_columns.is_empty() {
-            let dropped_set: std::collections::HashSet<usize> = dropped_columns.iter().copied().collect();
-            for local_column in &dropped_columns {
-                if let Some(raw_column) = raw_col_map.get(*local_column) {
-                    column_reasons.insert(
-                        *raw_column,
-                        "Column masked completely by sequence trimming".to_string(),
-                    );
-                }
-            }
-
-            let mut new_raw_col_map = Vec::with_capacity(raw_col_map.len());
-            for (idx, raw_column) in raw_col_map.iter().enumerate() {
-                if !dropped_set.contains(&idx) {
-                    new_raw_col_map.push(*raw_column);
-                }
-            }
-            raw_col_map = new_raw_col_map;
-            current_seqs = cleaned_seqs;
-        }
-    }
+    // Steps 3a-3c: Mask divergent regions and remove the columns they empty
+    mask_divergent_regions(
+        recipe,
+        &current_taxa,
+        &mut current_seqs,
+        &mut raw_col_map,
+        &mut column_reasons,
+        &mut all_masked_segments,
+    );
 
     // Step 4: Open Reading Frame & Codon Optimization (Exons)
     let reference_blocks_orf = is_coding_with_orf
@@ -464,7 +486,6 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             macse_trim_terminal: recipe.macse_trim_terminal,
             macse_max_internal_sample: recipe.macse_max_internal_sample,
             macse_max_internal_locus: recipe.macse_max_internal_locus,
-            fail_if_no_orf: recipe.fail_if_no_orf,
         };
 
         let mut orf_result = optimize_open_reading_frames_guided(
@@ -490,55 +511,20 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             || orf_result.retained_samples == 0
             || guided_has_internal_stop;
         if allows_reference_fallback && orf_reference_matched && guided_attempt_failed {
+            // The retry can select intron columns, so no exon span is reported.
+            reference_exon_span = None;
             current_seqs = pre_reference_seqs.clone();
             raw_col_map = pre_reference_raw_col_map.clone();
             column_reasons = pre_reference_column_reasons.clone();
             all_masked_segments.truncate(pre_reference_masked_segment_count);
-
-            if recipe.trim_hmm && current_seqs.len() > 2 {
-                let (hmm_seqs, segments) = clean_with_profile_hmm(
-                    &current_taxa,
-                    &current_seqs,
-                    recipe.hmm_min_posterior,
-                    recipe.hmm_min_segment_length,
-                    recipe.hmm_min_island_length,
-                );
-                all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
-                current_seqs = hmm_seqs;
-            }
-            if recipe.trim_segments && current_seqs.len() > 2 {
-                let (masked_seqs, segments) = mask_divergent_segments(
-                    &current_taxa,
-                    &current_seqs,
-                    recipe.segment_window_size,
-                    recipe.segment_threshold,
-                );
-                all_masked_segments.extend(map_masked_segments_to_raw(segments, &raw_col_map));
-                current_seqs = masked_seqs;
-            }
-            if recipe.remove_gap_only_columns && !current_seqs.is_empty() {
-                let (cleaned_seqs, dropped_columns) = remove_gap_only_columns(&current_seqs);
-                if !dropped_columns.is_empty() {
-                    let dropped_set: HashSet<usize> =
-                        dropped_columns.iter().copied().collect();
-                    for local_column in &dropped_columns {
-                        if let Some(raw_column) = raw_col_map.get(*local_column) {
-                            column_reasons.insert(
-                                *raw_column,
-                                "Column masked completely by sequence trimming".to_string(),
-                            );
-                        }
-                    }
-                    raw_col_map = raw_col_map
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(index, raw_column)| {
-                            (!dropped_set.contains(&index)).then_some(raw_column)
-                        })
-                        .collect();
-                    current_seqs = cleaned_seqs;
-                }
-            }
+            mask_divergent_regions(
+                recipe,
+                &current_taxa,
+                &mut current_seqs,
+                &mut raw_col_map,
+                &mut column_reasons,
+                &mut all_masked_segments,
+            );
 
             selected_region_raw_map = raw_col_map.clone();
             orf_result = optimize_open_reading_frames_guided(
@@ -593,24 +579,18 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             dropped_taxa_reasons.insert(t.clone(), "Premature internal stop codon in exon".to_string());
         }
         all_dropped_taxa.extend(orf_result.dropped_taxa);
-        all_masked_segments.extend(orf_result.masked_segments);
 
-        let cur_len = raw_col_map.len();
-        let mut kept_mask = vec![true; cur_len];
-        for &local_col in &orf_result.trimmed_columns {
-            if local_col < cur_len {
-                kept_mask[local_col] = false;
-                let raw_c = raw_col_map[local_col];
-                column_reasons.insert(raw_c, "ORF Frame Shift / Codon Boundary".to_string());
-            }
-        }
-        let mut new_raw_col_map = Vec::new();
-        for (idx, &kept) in kept_mask.iter().enumerate() {
-            if kept {
-                new_raw_col_map.push(raw_col_map[idx]);
-            }
-        }
-        raw_col_map = new_raw_col_map;
+        remove_mapped_columns(
+            &mut raw_col_map,
+            &mut column_reasons,
+            &orf_result.trimmed_columns,
+            |_| "ORF Frame Shift / Codon Boundary".to_string(),
+        );
+        // ORF masks use the columns of the ORF output, which `raw_col_map` now matches.
+        all_masked_segments.extend(map_masked_segments_to_raw(
+            orf_result.masked_segments,
+            &raw_col_map,
+        ));
         current_taxa = orf_result.taxa;
         current_seqs = orf_result.sequences;
     }
@@ -618,32 +598,23 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     // Step 5: External Ragged Edge Trimming
     if recipe.trim_external && !current_seqs.is_empty() {
         let preserve_codon_frame = recipe.codon_preserving || is_coding_with_orf;
+        // The ORF output starts in frame. Without ORF, the frame comes from the
+        // input column numbers, because earlier steps can remove single columns.
+        let input_columns = (!is_coding_with_orf).then_some(raw_col_map.as_slice());
         let (ext_seqs, dropped_local_cols, _) = trim_external(
             &current_seqs,
             recipe.min_external_percent,
             preserve_codon_frame,
+            input_columns,
         );
         let cur_len = raw_col_map.len();
-        let mut kept_mask = vec![true; cur_len];
-        for &local_col in &dropped_local_cols {
-            if local_col < cur_len {
-                kept_mask[local_col] = false;
-                let raw_c = raw_col_map[local_col];
-                let reason = if local_col < cur_len / 2 {
-                    format!("Ragged 5' End (< {:.0}% taxa coverage)", recipe.min_external_percent)
-                } else {
-                    format!("Ragged 3' End (< {:.0}% taxa coverage)", recipe.min_external_percent)
-                };
-                column_reasons.insert(raw_c, reason);
+        remove_mapped_columns(&mut raw_col_map, &mut column_reasons, &dropped_local_cols, |local_col| {
+            if local_col < cur_len / 2 {
+                format!("Ragged 5' End (< {:.0}% taxa coverage)", recipe.min_external_percent)
+            } else {
+                format!("Ragged 3' End (< {:.0}% taxa coverage)", recipe.min_external_percent)
             }
-        }
-        let mut new_raw_col_map = Vec::new();
-        for (idx, &kept) in kept_mask.iter().enumerate() {
-            if kept {
-                new_raw_col_map.push(raw_col_map[idx]);
-            }
-        }
-        raw_col_map = new_raw_col_map;
+        });
         current_seqs = ext_seqs;
     }
 
@@ -651,43 +622,27 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     if recipe.trim_columns && !is_coding_with_orf && !current_seqs.is_empty() {
         let (col_seqs, dropped_local_cols) =
             trim_alignment_columns(&current_seqs, recipe.min_column_gap_percent, recipe.count_n_as_gap);
-        let cur_len = raw_col_map.len();
-        let mut kept_mask = vec![true; cur_len];
-        for &local_col in &dropped_local_cols {
-            if local_col < cur_len {
-                kept_mask[local_col] = false;
-                let raw_c = raw_col_map[local_col];
-                let mut gaps = 0usize;
-                for s in &current_seqs {
-                    if let Some(&b) = s.as_bytes().get(local_col) {
-                        let u = b.to_ascii_uppercase();
-                        if u == b'-' || u == b'?' || (recipe.count_n_as_gap && u == b'N') {
-                            gaps += 1;
-                        }
+        remove_mapped_columns(&mut raw_col_map, &mut column_reasons, &dropped_local_cols, |local_col| {
+            let mut gaps = 0usize;
+            for s in &current_seqs {
+                if let Some(&b) = s.as_bytes().get(local_col) {
+                    let u = b.to_ascii_uppercase();
+                    if u == b'-' || u == b'?' || (recipe.count_n_as_gap && u == b'N') {
+                        gaps += 1;
                     }
                 }
-                let gap_pct = if !current_seqs.is_empty() {
-                    (gaps as f64 / current_seqs.len() as f64) * 100.0
-                } else {
-                    100.0
-                };
-                column_reasons.insert(
-                    raw_c,
-                    format!("High Gap Column ({:.1}% gaps > max {:.1}%)", gap_pct, recipe.min_column_gap_percent),
-                );
             }
-        }
-        let mut new_raw_col_map = Vec::new();
-        for (idx, &kept) in kept_mask.iter().enumerate() {
-            if kept {
-                new_raw_col_map.push(raw_col_map[idx]);
-            }
-        }
-        raw_col_map = new_raw_col_map;
+            let gap_pct = if !current_seqs.is_empty() {
+                (gaps as f64 / current_seqs.len() as f64) * 100.0
+            } else {
+                100.0
+            };
+            format!("High Gap Column ({:.1}% gaps > max {:.1}%)", gap_pct, recipe.min_column_gap_percent)
+        });
         current_seqs = col_seqs;
     }
 
-    // Step 6b: Statistical Column Trimming (trimAl & Gblocks) (Bypassed on coding loci when ORF is enabled)
+    // Step 6b: Statistical Column Trimming (similarity, conserved blocks, entropy) (Bypassed on coding loci when ORF is enabled)
     if recipe.enable_statistical_columns && !is_coding_with_orf && !current_seqs.is_empty() {
         let (stat_seqs, dropped_local_cols, stat_reasons) = trim_statistical_columns(
             &current_seqs,
@@ -700,25 +655,11 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
             recipe.stat_col_gap_treatment,
             recipe.stat_col_entropy_threshold,
         );
-        let cur_len = raw_col_map.len();
-        let mut kept_mask = vec![true; cur_len];
-        for &local_col in &dropped_local_cols {
-            if local_col < cur_len {
-                kept_mask[local_col] = false;
-                let raw_c = raw_col_map[local_col];
-                let reason = stat_reasons.get(&local_col).cloned().unwrap_or_else(|| {
-                    "Statistical Column Quality Threshold".to_string()
-                });
-                column_reasons.insert(raw_c, reason);
-            }
-        }
-        let mut new_raw_col_map = Vec::new();
-        for (idx, &kept) in kept_mask.iter().enumerate() {
-            if kept {
-                new_raw_col_map.push(raw_col_map[idx]);
-            }
-        }
-        raw_col_map = new_raw_col_map;
+        remove_mapped_columns(&mut raw_col_map, &mut column_reasons, &dropped_local_cols, |local_col| {
+            stat_reasons.get(&local_col).cloned().unwrap_or_else(|| {
+                "Statistical Column Quality Threshold".to_string()
+            })
+        });
         current_seqs = stat_seqs;
     }
 
@@ -739,7 +680,13 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
     let new_variable_percent = new_site_stats.variable_percent;
     let new_pis = new_site_stats.pis_count;
     let new_pis_percent = new_site_stats.pis_percent;
-    let final_stop_codons = detect_stop_codons(&current_taxa, &current_seqs, recipe.genetic_code);
+    // A stop codon has a meaning only in a reading frame, so look for stops
+    // only on coding loci with ORF analysis on.
+    let final_stop_codons = if is_coding_with_orf {
+        detect_stop_codons(&current_taxa, &current_seqs, recipe.genetic_code)
+    } else {
+        Vec::new()
+    };
     let stop_codons = raw_orf_stop_codons
         .unwrap_or_else(|| map_final_stops_to_raw(&final_stop_codons, &raw_col_map));
 
@@ -868,6 +815,8 @@ pub fn apply_recipe(alignment: &Alignment, recipe: &TrimmingRecipe, total_datase
         orf_reference_identity,
         orf_reference_coverage,
         orf_intron_length,
+        reference_exon_start: reference_exon_span.map(|(start, _)| start),
+        reference_exon_end: reference_exon_span.map(|(_, end)| end),
         pass,
         fail_reasons,
     };
@@ -1037,7 +986,6 @@ mod tests {
         recipe.trim_hmm = false;
         recipe.enable_orf = true;
         recipe.exclude_uce = true;
-        recipe.fail_if_no_orf = true;
         recipe.stop_codon_action = StopCodonAction::RemoveSample;
         recipe.trim_external = false;
         recipe.trim_columns = false;
@@ -1063,6 +1011,80 @@ mod tests {
             .fail_reasons
             .iter()
             .any(|reason| reason.starts_with("ORF check failed")));
+    }
+
+    #[test]
+    fn orf_masks_are_reported_in_raw_columns() {
+        // The leading gap-only column is removed before ORF analysis, so the
+        // masked stop codon must shift back by one column in raw coordinates.
+        let alignment = Alignment::new(
+            "exon_orf_mask".to_string(),
+            "exon_orf_mask.fa".to_string(),
+            "/dummy/exon_orf_mask.fa".to_string(),
+            AlignmentFormat::Fasta,
+            vec![
+                "Taxon_1".to_string(),
+                "Taxon_2".to_string(),
+                "Taxon_3".to_string(),
+                "Taxon_Stop".to_string(),
+            ],
+            vec![
+                "-ATGAAAGGG".to_string(),
+                "-ATGAAAGGG".to_string(),
+                "-ATGAAAGGG".to_string(),
+                "-ATGTAAGGG".to_string(),
+            ],
+        );
+
+        let mut recipe = TrimmingRecipe::default();
+        recipe.trim_similarity = false;
+        recipe.enable_orf = true;
+        recipe.exclude_uce = false;
+        recipe.stop_codon_action = StopCodonAction::MaskCodon;
+        recipe.trim_external = false;
+        recipe.trim_coverage = false;
+        recipe.assess_alignment = false;
+
+        let (_, diff) = apply_recipe(&alignment, &recipe, 4);
+
+        let stop = diff
+            .stop_codons
+            .iter()
+            .find(|stop| stop.taxon == "Taxon_Stop")
+            .expect("the stop codon is reported");
+        assert_eq!((stop.start, stop.end), (4, 7));
+        let masks: Vec<(usize, usize)> = diff
+            .masked_segments
+            .iter()
+            .filter(|segment| segment.taxon == "Taxon_Stop")
+            .map(|segment| (segment.start, segment.end))
+            .collect();
+        assert_eq!(masks, vec![(4, 7)]);
+    }
+
+    #[test]
+    fn stop_codons_are_reported_only_with_orf_analysis() {
+        let alignment = Alignment::new(
+            "anura-05637_uce-0016".to_string(),
+            "anura-05637_uce-0016.fa".to_string(),
+            "/dummy/anura-05637_uce-0016.fa".to_string(),
+            AlignmentFormat::Fasta,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            vec!["ATGTAAGGG".to_string(), "ATGTAAGGG".to_string(), "ATGTAAGGG".to_string()],
+        );
+        let mut recipe = TrimmingRecipe::default();
+        recipe.trim_similarity = false;
+        recipe.trim_coverage = false;
+        recipe.assess_alignment = false;
+
+        // ORF off, and ORF on for a UCE locus that ORF analysis skips.
+        for enable_orf in [false, true] {
+            recipe.enable_orf = enable_orf;
+            recipe.exclude_uce = true;
+            let (_, diff) = apply_recipe(&alignment, &recipe, 3);
+            assert!(diff.final_stop_codons.is_empty());
+            assert!(diff.stop_codons.is_empty());
+        }
     }
 
     #[test]
@@ -1099,6 +1121,8 @@ mod tests {
         assert!(diff.orf_reference_evaluated);
         assert!(diff.orf_reference_matched);
         assert_eq!(diff.orf_intron_length, 12);
+        assert_eq!(diff.reference_exon_start, Some(6));
+        assert_eq!(diff.reference_exon_end, Some(6 + exon.len()));
         assert_eq!(transformed.length, exon.len());
         assert!(transformed.sequences.iter().all(|sequence| sequence == exon));
     }
@@ -1219,5 +1243,7 @@ mod tests {
         assert!(diff.found_valid_orf);
         assert!(diff.pass);
         assert!(transformed.length >= 35 * 3);
+        assert!(strict_diff.reference_exon_start.is_some());
+        assert_eq!(diff.reference_exon_start, None);
     }
 }

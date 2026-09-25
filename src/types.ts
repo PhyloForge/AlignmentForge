@@ -200,6 +200,8 @@ export interface TrimmingDiff {
   orf_reference_identity?: number;
   orf_reference_coverage?: number;
   orf_intron_length?: number;
+  reference_exon_start?: number;
+  reference_exon_end?: number;
   pass: boolean;
   fail_reasons: string[];
 }
@@ -239,6 +241,7 @@ export interface TrimmingRecipe {
   orf_min_segment_aa: number;
   orf_min_coding_score: number;
   exclude_uce: boolean;
+  /** No code reads this field. It stays so that older config files still load. */
   fail_if_no_orf: boolean;
   orf_use_references: boolean;
   orf_reference_sequences: Record<string, string>;

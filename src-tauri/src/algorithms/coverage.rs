@@ -63,50 +63,6 @@ pub fn filter_sample_coverage(
     (kept_taxa, kept_seqs, dropped_taxa)
 }
 
-/// Port of PhyloProcessR `trimAlignmentRows.R`
-/// Removes individual sequences where overall gap percentage meets or exceeds `max_gap_percent`.
-pub fn filter_alignment_rows(
-    taxa: &[String],
-    sequences: &[String],
-    max_gap_percent: f64,
-    count_n_as_gap: bool,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
-    if sequences.len() <= 2 || sequences.is_empty() {
-        return (taxa.to_vec(), sequences.to_vec(), Vec::new());
-    }
-
-    let mut kept_taxa = Vec::new();
-    let mut kept_seqs = Vec::new();
-    let mut dropped_taxa = Vec::new();
-
-    for (name, seq) in taxa.iter().zip(sequences.iter()) {
-        let total = seq.len();
-        if total == 0 {
-            dropped_taxa.push(name.clone());
-            continue;
-        }
-
-        let gaps = seq
-            .as_bytes()
-            .iter()
-            .filter(|&&b| {
-                let u = b.to_ascii_uppercase();
-                u == b'-' || u == b'?' || (count_n_as_gap && u == b'N')
-            })
-            .count();
-
-        let gap_pct = (gaps as f64 / total as f64) * 100.0;
-        if gap_pct < max_gap_percent {
-            kept_taxa.push(name.clone());
-            kept_seqs.push(seq.clone());
-        } else {
-            dropped_taxa.push(name.clone());
-        }
-    }
-
-    (kept_taxa, kept_seqs, dropped_taxa)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

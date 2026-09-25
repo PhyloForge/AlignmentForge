@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +7,7 @@ use crate::parsers::{parse_alignment, write_alignment};
 use crate::pipeline::catalog::recipe_with_dataset_sample_filter;
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
-use crate::export::concatenate::{LocusPartition};
+use crate::export::concatenate::{build_supermatrix, write_nexus_partitions, write_raxml_partitions};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupedConcatenateConfig {
@@ -29,26 +27,33 @@ pub struct GroupedConcatenateResult {
     pub output_directory: String,
 }
 
+/// Chooses the gene map delimiter. A tab in the first line marks a
+/// tab-separated file, whatever its extension.
+fn gene_map_delimiter(path: &str, content: &str) -> u8 {
+    let is_tsv = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsv"));
+    let first_line = content.lines().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    if is_tsv || first_line.contains('\t') {
+        b'\t'
+    } else {
+        b','
+    }
+}
+
 pub fn concatenate_alignments_by_gene(
     config: &GroupedConcatenateConfig,
     recipe: &TrimmingRecipe,
     resolved_dataset_taxa: Option<usize>,
 ) -> Result<GroupedConcatenateResult, String> {
     // 1. Parse the metadata file (CSV, TSV, or TXT)
-    let delimiter = if Path::new(&config.gene_mapping_csv_path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsv"))
-    {
-        b'\t'
-    } else {
-        b','
-    };
+    let content = std::fs::read_to_string(&config.gene_mapping_csv_path)
+        .map_err(|e| format!("Could not open gene mapping file: {e}"))?;
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
-        .delimiter(delimiter)
-        .from_path(&config.gene_mapping_csv_path)
-        .map_err(|e| format!("Could not open gene mapping file: {e}"))?;
+        .delimiter(gene_map_delimiter(&config.gene_mapping_csv_path, &content))
+        .from_reader(content.as_bytes());
 
     // exon_name -> gene_name
     let mut exon_to_gene: BTreeMap<String, String> = BTreeMap::new();
@@ -133,14 +138,10 @@ pub fn concatenate_alignments_by_gene(
         }
 
         let mut passing_alignments = Vec::new();
-        let mut all_taxa_set = BTreeSet::new();
 
         for raw in &raw_alignments {
             let (transformed, diff) = apply_recipe(raw, &runtime_recipe, total_dataset_taxa);
             if (!config.only_passing || diff.pass) && transformed.length > 0 && !transformed.taxa.is_empty() {
-                for taxon in &transformed.taxa {
-                    all_taxa_set.insert(taxon.clone());
-                }
                 passing_alignments.push(transformed);
             }
         }
@@ -149,47 +150,8 @@ pub fn concatenate_alignments_by_gene(
             continue;
         }
 
-        let all_taxa: Vec<String> = all_taxa_set.into_iter().collect();
-        let mut concatenated_seqs: BTreeMap<String, String> = BTreeMap::new();
-        for taxon in &all_taxa {
-            concatenated_seqs.insert(taxon.clone(), String::new());
-        }
-
-        let mut partitions = Vec::new();
-        let mut current_offset = 0usize;
-
-        for align in &passing_alignments {
-            let locus_len = align.length;
-            let start_1based = current_offset + 1;
-            let end_1based = current_offset + locus_len;
-
-            partitions.push(LocusPartition {
-                name: align.id.clone(),
-                start: start_1based,
-                end: end_1based,
-                length: locus_len,
-            });
-
-            let taxon_seq_map: BTreeMap<&str, &str> = align
-                .taxa
-                .iter()
-                .zip(align.sequences.iter())
-                .map(|(t, s)| (t.as_str(), s.as_str()))
-                .collect();
-
-            let gap_pad = "-".repeat(locus_len);
-            for taxon in &all_taxa {
-                let seq_chunk = taxon_seq_map.get(taxon.as_str()).copied().unwrap_or(&gap_pad);
-                if let Some(sequence) = concatenated_seqs.get_mut(taxon) {
-                    sequence.push_str(seq_chunk);
-                }
-            }
-            current_offset += locus_len;
-            total_exons_processed += 1;
-        }
-
-        let final_taxa: Vec<String> = concatenated_seqs.keys().cloned().collect();
-        let final_seqs: Vec<String> = concatenated_seqs.values().cloned().collect();
+        let (final_taxa, final_seqs, partitions) = build_supermatrix(&passing_alignments);
+        total_exons_processed += passing_alignments.len();
         let out_prefix = Path::new(&config.output_directory).join(gene);
         let out_prefix_str = out_prefix.to_string_lossy();
         let supermatrix_path = format!("{}.{}", out_prefix_str, config.output_format.extension());
@@ -203,27 +165,11 @@ pub fn concatenate_alignments_by_gene(
         .map_err(|error| format!("Failed to write gene alignment '{gene}': {error}"))?;
 
         if config.write_raxml_partitions {
-            let raxml_path = format!("{}_partitions.txt", out_prefix_str);
-            let mut file = File::create(&raxml_path)
-                .map_err(|error| format!("Failed to create partition file for '{gene}': {error}"))?;
-            for part in &partitions {
-                writeln!(file, "DNA, {} = {}-{}", part.name, part.start, part.end)
-                    .map_err(|error| format!("Failed to write partition file for '{gene}': {error}"))?;
-            }
+            write_raxml_partitions(&format!("{}_partitions.txt", out_prefix_str), &partitions)?;
         }
 
         if config.write_nexus_partitions {
-            let nex_path = format!("{}_partitions.nex", out_prefix_str);
-            let mut file = File::create(&nex_path)
-                .map_err(|error| format!("Failed to create NEXUS partition file for '{gene}': {error}"))?;
-            writeln!(file, "#NEXUS\nBEGIN SETS;")
-                .map_err(|error| format!("Failed to write NEXUS partition file for '{gene}': {error}"))?;
-            for part in &partitions {
-                writeln!(file, "  CHARSET {} = {}-{};", part.name, part.start, part.end)
-                    .map_err(|error| format!("Failed to write NEXUS partition file for '{gene}': {error}"))?;
-            }
-            writeln!(file, "END;")
-                .map_err(|error| format!("Failed to finish NEXUS partition file for '{gene}': {error}"))?;
+            write_nexus_partitions(&format!("{}_partitions.nex", out_prefix_str), &partitions)?;
         }
 
         total_genes += 1;
@@ -242,6 +188,13 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use crate::models::AlignmentFormat;
+
+    #[test]
+    fn tab_separated_gene_map_is_detected_from_its_content() {
+        assert_eq!(gene_map_delimiter("map.txt", "exon1\tgeneA\n"), b'\t');
+        assert_eq!(gene_map_delimiter("map.tsv", "exon1,geneA\n"), b'\t');
+        assert_eq!(gene_map_delimiter("map.txt", "\nexon1,geneA\n"), b',');
+    }
 
     #[test]
     fn test_concatenate_alignments_by_gene() {

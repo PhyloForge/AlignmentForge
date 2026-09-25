@@ -2,9 +2,10 @@ use crate::algorithms::stats::{compute_majority_consensus, pairwise_distance_to_
 use crate::models::MaskedSegment;
 
 /// Port of PhyloProcessR `trimSampleSegments.R`
-/// Masks localized divergent segments within individual sequences by sliding a window of `window_size`
-/// base pairs across the alignment. For each window, if a sample's divergence from consensus exceeds
-/// `threshold`, that localized segment is masked as gaps (`-`).
+/// Masks localized divergent segments within individual sequences. The alignment is cut into
+/// fixed, non-overlapping windows of `window_size` base pairs. For each window, if a sample's
+/// divergence from consensus exceeds `threshold`, that segment is masked as gaps (`-`).
+/// A divergent region that crosses a window edge is split between two windows.
 pub fn mask_divergent_segments(
     taxa: &[String],
     sequences: &[String],
@@ -20,7 +21,6 @@ pub fn mask_divergent_segments(
         return (sequences.to_vec(), Vec::new());
     }
 
-    let _num_seqs = sequences.len();
     let mut seq_chars: Vec<Vec<char>> = sequences.iter().map(|s| s.chars().collect()).collect();
     let mut masked_segments = Vec::new();
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Search,
   CheckCircle,
@@ -7,8 +7,6 @@ import {
   ArrowUpDown,
   CheckSquare,
   Square,
-  ChevronLeft,
-  ChevronRight,
   Loader2,
 } from 'lucide-react';
 import { AlignmentSummary, CatalogSortField, OrfSearchMode } from '../types';
@@ -163,7 +161,6 @@ export const CatalogView: React.FC<CatalogViewProps> = React.memo(({
   }, [filteredAndSorted, onVisibleOrderChange]);
 
   const totalRows = filteredAndSorted.length;
-  const totalHeight = totalRows * ROW_HEIGHT;
 
   // Virtual Window Calculation
   const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);

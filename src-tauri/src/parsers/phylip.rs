@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use crate::models::{Alignment, AlignmentFormat};
-use crate::parsers::validate_alignment_shape;
+use crate::parsers::{normalize_sequence_symbols, validate_alignment_shape};
 
 pub fn parse_phylip<P: AsRef<Path>>(path: P) -> Result<Alignment, String> {
     let path_ref = path.as_ref();
@@ -85,6 +85,38 @@ pub fn parse_phylip_str(
             })
     };
 
+    // Sequential layout: a named line, then continuation lines, which may hold
+    // spaced blocks, until the record has the declared length. `None` means
+    // that the file does not fit this layout.
+    let read_sequential = || -> Option<(Vec<String>, Vec<String>)> {
+        let mut taxa = Vec::with_capacity(expected_taxa);
+        let mut sequences: Vec<String> = Vec::with_capacity(expected_taxa);
+        for line in &remaining_lines {
+            match sequences.last_mut() {
+                Some(sequence) if sequence.len() < expected_length => {
+                    if !line.split_whitespace().all(|token| is_sequence_only(token)) {
+                        return None;
+                    }
+                    sequence.push_str(&sequence_chars(line));
+                    if sequence.len() > expected_length {
+                        return None;
+                    }
+                }
+                _ => {
+                    let (name, sequence) = split_named_line(line);
+                    if taxa.len() == expected_taxa || sequence.len() > expected_length {
+                        return None;
+                    }
+                    taxa.push(name);
+                    sequences.push(sequence);
+                }
+            }
+        }
+        let complete = taxa.len() == expected_taxa
+            && sequences.iter().all(|sequence| sequence.len() == expected_length);
+        complete.then_some((taxa, sequences))
+    };
+
     if remaining_lines.len() == expected_taxa {
         // Exactly one line per taxon.
         for line in remaining_lines {
@@ -92,6 +124,9 @@ pub fn parse_phylip_str(
             taxa.push(name);
             sequences.push(seq);
         }
+    } else if let Some((sequential_taxa, sequential_sequences)) = read_sequential() {
+        taxa = sequential_taxa;
+        sequences = sequential_sequences;
     } else {
         // Before all declared taxa have been read, sequence-only lines continue
         // the most recent sequential record. After the first block has defined
@@ -164,6 +199,7 @@ pub fn parse_phylip_str(
         ));
     }
 
+    normalize_sequence_symbols(&mut sequences);
     validate_alignment_shape(&taxa, &sequences, Some(expected_length), "PHYLIP")?;
 
     Ok(Alignment::new(
@@ -275,6 +311,23 @@ mod tests {
         let parsed = parse_phylip_str(content, "id", "test.phy", "test.phy").unwrap();
 
         assert_eq!(parsed.sequences, vec!["AAAAGGGG", "CCCCTTTT"]);
+    }
+
+    #[test]
+    fn parses_sequential_records_with_spaced_continuation_blocks() {
+        let content = "2 20\na ACGTACGTAC\nGTACG TACGT\nb ACGTACGTAC\nGTACG TACGA\n";
+        let parsed = parse_phylip_str(content, "id", "test.phy", "test.phy").unwrap();
+
+        assert_eq!(parsed.taxa, vec!["a", "b"]);
+        assert_eq!(parsed.sequences, vec!["ACGTACGTACGTACGTACGT", "ACGTACGTACGTACGTACGA"]);
+    }
+
+    #[test]
+    fn parses_sequential_file_where_only_the_last_record_wraps() {
+        let content = "2 8\na AAAAAAAA\nb CCCC\nCCCC\n";
+        let parsed = parse_phylip_str(content, "id", "test.phy", "test.phy").unwrap();
+
+        assert_eq!(parsed.sequences, vec!["AAAAAAAA", "CCCCCCCC"]);
     }
 
     #[test]

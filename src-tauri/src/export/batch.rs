@@ -11,7 +11,8 @@ use crate::pipeline::catalog::{
 };
 use crate::pipeline::engine::apply_recipe;
 use crate::pipeline::recipe::TrimmingRecipe;
-use crate::algorithms::reference::intron_alignment_from_reference;
+use crate::algorithms::orf::OrfSearchMode;
+use crate::algorithms::reference::intron_alignment_outside;
 
 fn default_true() -> bool {
     true
@@ -127,6 +128,17 @@ fn validate_directory_name<'a>(label: &str, name: &'a str) -> Result<&'a str, St
     Ok(name)
 }
 
+/// Intron export needs the exon span that a reference ORF mode finds.
+fn exports_introns(config: &BatchExportConfig, recipe: &TrimmingRecipe) -> bool {
+    config.export_introns
+        && recipe.enable_orf
+        && recipe.orf_use_references
+        && matches!(
+            recipe.orf_search_mode,
+            OrfSearchMode::ReferenceGuided | OrfSearchMode::ReferenceCandidateOrf
+        )
+}
+
 pub fn execute_batch_export(
     config: &BatchExportConfig,
     recipe: &TrimmingRecipe,
@@ -142,6 +154,7 @@ pub fn execute_batch_export(
     )?;
     let intron_directory_name =
         validate_directory_name("Intron folder name", &config.intron_directory_name)?;
+    let export_introns = exports_introns(config, recipe);
     let mut active_directory_names = Vec::new();
     if config.export_general_alignments {
         active_directory_names.push(general_directory_name.to_lowercase());
@@ -149,7 +162,7 @@ pub fn execute_batch_export(
     if config.export_orf_alignments && recipe.enable_orf {
         active_directory_names.push(orf_directory_name.to_lowercase());
     }
-    if config.export_introns && recipe.enable_orf && recipe.orf_use_references {
+    if export_introns {
         active_directory_names.push(intron_directory_name.to_lowercase());
     }
     active_directory_names.sort();
@@ -228,7 +241,7 @@ pub fn execute_batch_export(
         fs::create_dir_all(&orf_dir)
             .map_err(|e| format!("Failed to create ORF output directory: {e}"))?;
     }
-    if config.export_introns && runtime_recipe.enable_orf && runtime_recipe.orf_use_references {
+    if export_introns {
         fs::create_dir_all(&intron_dir)
             .map_err(|e| format!("Failed to create intron output directory: {e}"))?;
     }
@@ -270,10 +283,15 @@ pub fn execute_batch_export(
                 false
             };
 
+            // One ORF run gives the ORF output and the exon span for the intron.
+            let orf_run = (runtime_recipe.enable_orf
+                && (config.export_orf_alignments || export_introns))
+                .then(|| apply_recipe(raw_align, &runtime_recipe, total_dataset_taxa));
+
             let (orf_accepted, orf_exported, orf_taxa, orf_length) =
-                if config.export_orf_alignments && runtime_recipe.enable_orf {
-                    let (orf_alignment, orf_diff) =
-                        apply_recipe(raw_align, &runtime_recipe, total_dataset_taxa);
+                if let Some((orf_alignment, orf_diff)) =
+                    orf_run.as_ref().filter(|_| config.export_orf_alignments)
+                {
                     let accepted = orf_diff.orf_evaluated
                         && orf_diff.orf_candidate_found
                         && orf_diff.found_valid_orf
@@ -312,46 +330,45 @@ pub fn execute_batch_export(
                 };
 
             let mut intron_exported = false;
-            if config.export_introns
-                && runtime_recipe.enable_orf
-                && runtime_recipe.orf_use_references
-            {
-                if let Some(reference) = runtime_recipe.orf_reference_sequences.get(&raw_align.id) {
-                    if let Some((intron_alignment, _)) =
-                        intron_alignment_from_reference(raw_align, reference)
-                    {
-                        if intron_alignment.length > 0 {
-                            let mut intron_recipe = catalog_recipe.clone();
-                            intron_recipe.orf_reference_sequences.clear();
-                            let (filtered_intron, intron_diff) =
-                                apply_recipe(&intron_alignment, &intron_recipe, total_dataset_taxa);
-                            let should_export_intron = !config.only_passing || intron_diff.pass;
-                            if should_export_intron
-                                && !filtered_intron.sequences.is_empty()
-                                && filtered_intron.length > 0
-                            {
-                                let intron_path = output_path(
-                                    &intron_dir,
-                                    &filtered_intron,
-                                    config.output_format,
-                                );
-                                intron_exported = match write_alignment_atomic(
-                                    &intron_path,
-                                    &filtered_intron.taxa,
-                                    &filtered_intron.sequences,
-                                    config.output_format,
-                                ) {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        record_errors.push(BatchExportError {
-                                            input_path: raw_align.file_path.clone(),
-                                            output_path: intron_path.to_string_lossy().to_string(),
-                                            error,
-                                        });
-                                        false
-                                    }
-                                };
-                            }
+            // No span means no reference match, or a fallback ORF that can
+            // include intron columns; the locus then has no intron file.
+            let exon_span = orf_run.as_ref().and_then(|(_, orf_diff)| {
+                Some((orf_diff.reference_exon_start?, orf_diff.reference_exon_end?))
+            });
+            if export_introns {
+                if let Some((exon_start, exon_end)) = exon_span {
+                    let intron_alignment = intron_alignment_outside(raw_align, exon_start, exon_end);
+                    if intron_alignment.length > 0 {
+                        let mut intron_recipe = catalog_recipe.clone();
+                        intron_recipe.orf_reference_sequences.clear();
+                        let (filtered_intron, intron_diff) =
+                            apply_recipe(&intron_alignment, &intron_recipe, total_dataset_taxa);
+                        let should_export_intron = !config.only_passing || intron_diff.pass;
+                        if should_export_intron
+                            && !filtered_intron.sequences.is_empty()
+                            && filtered_intron.length > 0
+                        {
+                            let intron_path = output_path(
+                                &intron_dir,
+                                &filtered_intron,
+                                config.output_format,
+                            );
+                            intron_exported = match write_alignment_atomic(
+                                &intron_path,
+                                &filtered_intron.taxa,
+                                &filtered_intron.sequences,
+                                config.output_format,
+                            ) {
+                                Ok(()) => true,
+                                Err(error) => {
+                                    record_errors.push(BatchExportError {
+                                        input_path: raw_align.file_path.clone(),
+                                        output_path: intron_path.to_string_lossy().to_string(),
+                                        error,
+                                    });
+                                    false
+                                }
+                            };
                         }
                     }
                 }
@@ -577,6 +594,7 @@ mod tests {
         let mut recipe = TrimmingRecipe::default();
         recipe.enable_orf = true;
         recipe.orf_use_references = true;
+        recipe.orf_search_mode = OrfSearchMode::ReferenceGuided;
         recipe
             .orf_reference_sequences
             .insert("exon_export".to_string(), exon.to_string());
@@ -602,9 +620,15 @@ mod tests {
 
         let result = execute_batch_export(&config, &recipe, None).unwrap();
         assert_eq!(result.total_introns_exported, 1);
-        assert!(output_dir
-            .join("custom_introns/exon_export_intron.fa")
-            .exists());
+        let intron_path = output_dir.join("custom_introns/exon_export_intron.fa");
+        let intron = fs::read_to_string(&intron_path).unwrap();
+        assert!(intron.contains("CCCCCCGGGGGG"), "{intron}");
+
+        // Other ORF modes do not use the reference span, so they write no introns.
+        let _ = fs::remove_dir_all(&output_dir);
+        recipe.orf_search_mode = OrfSearchMode::ContinuousCds;
+        let result = execute_batch_export(&config, &recipe, None).unwrap();
+        assert_eq!(result.total_introns_exported, 0);
 
         let _ = fs::remove_dir_all(root);
     }

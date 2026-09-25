@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use crate::models::{Alignment, AlignmentFormat};
-use crate::parsers::validate_alignment_shape;
+use crate::parsers::{normalize_sequence_symbols, validate_alignment_shape};
 
 fn remove_comments(content: &str) -> Result<String, String> {
     let mut cleaned = String::with_capacity(content.len());
@@ -42,26 +42,62 @@ fn remove_comments(content: &str) -> Result<String, String> {
     Ok(cleaned)
 }
 
+/// Finds `keyword` as a whole word in `upper`, at or after byte `from`.
+fn find_word(upper: &str, keyword: &str, from: usize) -> Option<usize> {
+    let bytes = upper.as_bytes();
+    let is_word_byte =
+        |index: usize| bytes.get(index).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+    let mut search_from = from;
+    while let Some(offset) = upper.get(search_from..)?.find(keyword) {
+        let start = search_from + offset;
+        let end = start + keyword.len();
+        if (start == 0 || !is_word_byte(start - 1)) && !is_word_byte(end) {
+            return Some(start);
+        }
+        search_from = end;
+    }
+    None
+}
+
+/// Finds the MATRIX command. A command follows a `;`, so a title or a taxon
+/// label that contains the word is not a match.
+fn find_matrix_command(upper: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(start) = find_word(upper, "MATRIX", from) {
+        if upper[..start].trim_end().ends_with(';') {
+            return Some(start);
+        }
+        from = start + "MATRIX".len();
+    }
+    None
+}
+
+/// Reads `KEY=value` from the header. Only a whole word followed by `=` is a
+/// key, so a taxon label such as `Singapore_frog` cannot hide `GAP=`.
 fn metadata_value(metadata: &str, key: &str) -> Option<String> {
     let upper = metadata.to_ascii_uppercase();
-    let start = upper.find(key)? + key.len();
     let bytes = metadata.as_bytes();
-    let mut index = start;
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+    let mut from = 0;
+    while let Some(key_start) = find_word(&upper, key, from) {
+        from = key_start + key.len();
+        let mut index = from;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            continue;
+        }
         index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let end = metadata[index..]
+            .find(|character: char| character.is_whitespace() || character == ';')
+            .map(|offset| index + offset)
+            .unwrap_or(metadata.len());
+        return Some(metadata[index..end].trim_matches(['\'', '"']).to_string());
     }
-    if bytes.get(index) != Some(&b'=') {
-        return None;
-    }
-    index += 1;
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    let end = metadata[index..]
-        .find(|character: char| character.is_whitespace() || character == ';')
-        .map(|offset| index + offset)
-        .unwrap_or(metadata.len());
-    Some(metadata[index..end].trim_matches(['\'', '"']).to_string())
+    None
 }
 
 fn split_matrix_row(line: &str) -> Result<Vec<String>, String> {
@@ -130,8 +166,7 @@ pub fn parse_nexus_str(
 
     let cleaned = remove_comments(content)?;
     let upper = cleaned.to_ascii_uppercase();
-    let matrix_start = upper
-        .find("MATRIX")
+    let matrix_start = find_matrix_command(&upper)
         .ok_or_else(|| "No matrix data found in NEXUS file".to_string())?;
     let metadata = &cleaned[..matrix_start];
     let declared_taxa = metadata_value(metadata, "NTAX")
@@ -147,6 +182,11 @@ pub fn parse_nexus_str(
     let gap = metadata_value(metadata, "GAP").and_then(|value| value.chars().next()).unwrap_or('-');
     let missing = metadata_value(metadata, "MISSING").and_then(|value| value.chars().next()).unwrap_or('?');
     let match_character = metadata_value(metadata, "MATCHCHAR").and_then(|value| value.chars().next());
+    // INTERLEAVE may stand alone or carry YES or NO.
+    let interleaved = match metadata_value(metadata, "INTERLEAVE") {
+        Some(value) => !value.eq_ignore_ascii_case("NO"),
+        None => find_word(&metadata.to_ascii_uppercase(), "INTERLEAVE", 0).is_some(),
+    };
 
     let mut taxa: Vec<String> = Vec::new();
     let mut sequences: Vec<String> = Vec::new();
@@ -165,18 +205,31 @@ pub fn parse_nexus_str(
         }
         if !trimmed.is_empty() {
             let tokens = split_matrix_row(trimmed)?;
-            if tokens.len() == 1 && !taxa.is_empty() {
+            // Without INTERLEAVE, a row continues on the next lines until it
+            // holds NCHAR sites, whatever the number of tokens on a line.
+            let continues_last_row = !interleaved
+                && match declared_length {
+                    Some(length) => sequences.last().is_some_and(|sequence| {
+                        let added: usize = tokens.iter().map(String::len).sum();
+                        sequence.len() < length && sequence.len() + added <= length
+                    }),
+                    None => tokens.len() == 1 && !taxa.is_empty(),
+                };
+            if continues_last_row {
+                if let Some(sequence) = sequences.last_mut() {
+                    sequence.push_str(&tokens.concat());
+                }
+            } else if interleaved && tokens.len() == 1 && !taxa.is_empty() {
                 sequences[continuation_row].push_str(&tokens[0]);
                 continuation_row = (continuation_row + 1) % taxa.len();
-            } else if tokens.len() >= 2 {
-                let name = tokens[0].clone();
+            } else if let Some(name) = tokens.first() {
                 let sequence = tokens[1..].concat();
-                if let Some(&index) = taxon_index_map.get(&name) {
+                if let Some(&index) = taxon_index_map.get(name) {
                     sequences[index].push_str(&sequence);
                 } else {
                     let index = taxa.len();
                     taxon_index_map.insert(name.clone(), index);
-                    taxa.push(name);
+                    taxa.push(name.clone());
                     sequences.push(sequence);
                 }
             } else {
@@ -235,6 +288,7 @@ pub fn parse_nexus_str(
         }
     }
 
+    normalize_sequence_symbols(&mut sequences);
     validate_alignment_shape(&taxa, &sequences, declared_length, "NEXUS")?;
 
     Ok(Alignment::new(
@@ -266,10 +320,12 @@ pub fn write_nexus<P: AsRef<Path>>(
         num_taxa, length
     )
     .map_err(|e| e.to_string())?;
+    // No MATCHCHAR: the writer never writes match characters, and a declared
+    // `.` makes readers replace any `.` in the data with the first taxon's base.
     writeln!(
         file,
-        "  FORMAT DATATYPE=DNA GAP=- MISSING=? MATCHCHAR=. {};",
-        if interleaved { "INTERLEAVE" } else { "" }
+        "  FORMAT DATATYPE=DNA GAP=- MISSING=?{};",
+        if interleaved { " INTERLEAVE" } else { "" }
     )
     .map_err(|e| e.to_string())?;
     writeln!(file, "  MATRIX").map_err(|e| e.to_string())?;
@@ -339,12 +395,54 @@ mod tests {
     }
 
     #[test]
+    fn written_nexus_does_not_declare_a_match_character() {
+        let test_file = std::env::temp_dir().join("af_nexus_no_matchchar.nex");
+        let taxa = vec!["a".to_string(), "b".to_string()];
+        let seqs = vec!["ACGTACGT".to_string(), "ACGTTCGA".to_string()];
+
+        for interleaved in [false, true] {
+            write_nexus(&test_file, &taxa, &seqs, interleaved).unwrap();
+            let written = std::fs::read_to_string(&test_file).unwrap();
+            assert!(!written.contains("MATCHCHAR"), "{written}");
+            assert_eq!(parse_nexus(&test_file).unwrap().sequences, seqs);
+        }
+
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
     fn reads_metadata_match_characters_and_quoted_names() {
         let content = "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=2 NCHAR=4;\nFORMAT DATATYPE=DNA GAP=~ MISSING=X MATCHCHAR=.;\nMATRIX\n'first sample' AT~X\n'second ''sample''' ....;\nEND;\n";
         let parsed = parse_nexus_str(content, "id", "test.nex", "test.nex").unwrap();
 
         assert_eq!(parsed.taxa, vec!["first sample", "second 'sample'"]);
         assert_eq!(parsed.sequences, vec!["AT-?", "AT-?"]);
+    }
+
+    #[test]
+    fn parses_sequential_rows_that_span_several_lines() {
+        let content = "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=2 NCHAR=12;\nFORMAT DATATYPE=DNA;\nMATRIX\na ACGT\nACGT\nAC GT\nb\nCCCC GGGG\nTTTT\n;\nEND;\n";
+        let parsed = parse_nexus_str(content, "id", "test.nex", "test.nex").unwrap();
+
+        assert_eq!(parsed.taxa, vec!["a", "b"]);
+        assert_eq!(parsed.sequences, vec!["ACGTACGTACGT", "CCCCGGGGTTTT"]);
+    }
+
+    #[test]
+    fn interleaved_rows_without_names_still_rotate() {
+        let content = "#NEXUS\nBEGIN DATA;\nDIMENSIONS NTAX=2 NCHAR=8;\nFORMAT DATATYPE=DNA INTERLEAVE=YES;\nMATRIX\na ACGT\nb CCCC\nGGGG\nTTTT\n;\nEND;\n";
+        let parsed = parse_nexus_str(content, "id", "test.nex", "test.nex").unwrap();
+
+        assert_eq!(parsed.sequences, vec!["ACGTGGGG", "CCCCTTTT"]);
+    }
+
+    #[test]
+    fn header_keys_and_matrix_match_whole_words_only() {
+        let content = "#NEXUS\nBEGIN TAXA;\nDIMENSIONS NTAX=2;\nTAXLABELS Singapore_frog Matrix_toad;\nEND;\nBEGIN CHARACTERS;\nTITLE 'Frog matrix';\nDIMENSIONS NCHAR=4;\nFORMAT DATATYPE=DNA GAP=~ MISSING=?;\nMATRIX\nSingapore_frog AC~T\nMatrix_toad AC?T\n;\nEND;\n";
+        let parsed = parse_nexus_str(content, "id", "test.nex", "test.nex").unwrap();
+
+        assert_eq!(parsed.taxa, vec!["Singapore_frog", "Matrix_toad"]);
+        assert_eq!(parsed.sequences, vec!["AC-T", "AC?T"]);
     }
 
     #[test]

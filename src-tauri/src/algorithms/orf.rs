@@ -58,7 +58,6 @@ pub struct OrfConfig {
     pub min_segment_aa: usize,
     pub min_coding_score: f64,
     pub exclude_uce: bool,
-    pub fail_if_no_orf: bool,
     pub max_stop_codons_sample: usize,
     pub max_stop_codons_locus: usize,
     pub macse_trim_terminal: bool,
@@ -79,7 +78,6 @@ impl Default for OrfConfig {
             min_segment_aa: 35,
             min_coding_score: 40.0,
             exclude_uce: true,
-            fail_if_no_orf: false,
             max_stop_codons_sample: 2,
             max_stop_codons_locus: 5,
             macse_trim_terminal: true,
@@ -141,9 +139,13 @@ pub struct OrfOptimizationResult {
 /// without explicit annotations, AlignmentForge can only use identifier hints.
 pub fn should_skip_orf_locus(locus_id: &str, search_mode: OrfSearchMode) -> bool {
     let lower = locus_id.to_ascii_lowercase();
-    let always_skip = lower.starts_with("uce-")
-        || lower.starts_with("uce_")
-        || lower.starts_with("uce")
+    // `uce` is a token at the start of the ID or after `_`, `-`, or `.`, as in
+    // `anura-05637_uce-0016`. Keep in step with `shouldSkipOrfLocus`.
+    let has_uce_token = lower.starts_with("uce")
+        || lower.contains("_uce")
+        || lower.contains("-uce")
+        || lower.contains(".uce");
+    let always_skip = has_uce_token
         || lower.contains("noncoding")
         || lower.contains("non-coding")
         || lower.contains("intergenic")
@@ -710,6 +712,10 @@ pub fn find_best_shared_orf_segment(
                         .then_with(|| right.support_count.cmp(&left.support_count))
                         .then_with(|| right.length_codons.cmp(&left.length_codons))
                         .then_with(|| right.informative_codons.cmp(&left.informative_codons))
+                        // Position keys make the order total, so a tie does not
+                        // depend on the HashSet iteration order.
+                        .then_with(|| left.is_reverse.cmp(&right.is_reverse))
+                        .then_with(|| left.start.cmp(&right.start))
                 });
                 candidates.truncate(64);
             }
@@ -745,16 +751,6 @@ pub fn find_best_shared_orf_segment(
                     .cmp(&(right.support_count * right.length_codons))
             })
     })
-}
-
-/// Executes full Open Reading Frame optimization and stop codon quality control
-pub fn optimize_open_reading_frames(
-    taxa: &[String],
-    sequences: &[String],
-    locus_id: &str,
-    config: &OrfConfig,
-) -> OrfOptimizationResult {
-    optimize_open_reading_frames_guided(taxa, sequences, locus_id, config, None)
 }
 
 /// Runs ORF optimization with an optional frame supplied by a matched coding
@@ -912,8 +908,8 @@ pub fn optimize_open_reading_frames_guided(
     }
 
     // A reverse-strand result is only usable when the caller permits the
-    // alignment to be reoriented. Otherwise leave the locus unchanged and let
-    // fail_if_no_orf report that no usable ORF was found.
+    // alignment to be reoriented. Otherwise leave the locus unchanged. The
+    // locus assessment then reports that the best candidate is reverse-strand.
     if is_reverse && !config.auto_flip_reverse {
         found_valid_orf = false;
     }
@@ -1205,7 +1201,6 @@ mod tests {
             min_segment_aa: 3,
             min_coding_score: 0.0,
             exclude_uce: false,
-            fail_if_no_orf: false, 
             max_stop_codons_sample: 2,
             max_stop_codons_locus: 5,
             macse_trim_terminal: true,
@@ -1213,7 +1208,7 @@ mod tests {
             macse_max_internal_locus: 10,
         };
 
-        let result = optimize_open_reading_frames(&taxa, &seqs, "exon_001", &config);
+        let result = optimize_open_reading_frames_guided(&taxa, &seqs, "exon_001", &config, None);
 
         assert_eq!(result.taxa.len(), 2);
         assert_eq!(result.dropped_taxa, vec!["Taxon_Pseudogene"]);
@@ -1236,18 +1231,19 @@ mod tests {
             min_segment_aa: 3,
             min_coding_score: 0.0,
             exclude_uce: true,
-            fail_if_no_orf: false, ..Default::default() 
+            ..Default::default()
         };
 
         for locus_id in [
             "uce-1048",
+            "anura-05637_uce-0016",
             "gene_1_intron",
             "gene_2_supercontig",
             "gene_3_flanking",
             "gene_4_intergenic",
             "gene_5_non-coding",
         ] {
-            let result = optimize_open_reading_frames(&taxa, &seqs, locus_id, &config);
+            let result = optimize_open_reading_frames_guided(&taxa, &seqs, locus_id, &config, None);
 
             assert_eq!(result.taxa.len(), 1, "{locus_id}");
             assert_eq!(result.sequences[0], "GATGTTTGGGTAA", "{locus_id}");
@@ -1290,17 +1286,17 @@ mod tests {
             min_segment_aa: 2,
             min_coding_score: 0.0,
             exclude_uce: true,
-            fail_if_no_orf: true, ..Default::default() 
+            ..Default::default()
         };
 
         let result =
-            optimize_open_reading_frames(&taxa, &seqs, "gene_supercontig", &config);
+            optimize_open_reading_frames_guided(&taxa, &seqs, "gene_supercontig", &config, None);
         assert!(result.found_valid_orf);
         assert_eq!(result.sequences[0].len(), 12);
         assert_eq!(result.sequences[0].len() % 3, 0);
         assert_eq!(result.trimmed_columns.len(), 1);
 
-        let skipped = optimize_open_reading_frames(&taxa, &seqs, "uce-1048", &config);
+        let skipped = optimize_open_reading_frames_guided(&taxa, &seqs, "uce-1048", &config, None);
         assert_eq!(skipped.sequences, seqs);
         assert!(skipped.trimmed_columns.is_empty());
     }
@@ -1333,10 +1329,10 @@ mod tests {
             min_segment_aa: 35,
             min_coding_score: 40.0,
             exclude_uce: false,
-            fail_if_no_orf: true, ..Default::default() 
+            ..Default::default()
         };
 
-        let de_novo = optimize_open_reading_frames(&taxa, &sequences, "exon", &config);
+        let de_novo = optimize_open_reading_frames_guided(&taxa, &sequences, "exon", &config, None);
         assert_eq!(de_novo.candidate_frame, Some(1));
 
         let guided = optimize_open_reading_frames_guided(
@@ -1382,6 +1378,38 @@ mod tests {
                 first.0.to_bits(),
                 again.0.to_bits(),
                 "coding score must not vary between runs"
+            );
+        }
+    }
+
+    #[test]
+    fn tied_shared_segments_resolve_the_same_way_every_run() {
+        // Two equal stop-free runs separated by TAA give tied candidates.
+        let mut state = 7u64;
+        let mut run = String::new();
+        while run.len() < 41 * 3 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let codon: String = (0..3)
+                .map(|shift| b"ACGT"[((state >> (33 + 2 * shift)) & 3) as usize] as char)
+                .collect();
+            if translate_codon(codon.as_bytes(), GeneticCode::Standard) != '*' {
+                run.push_str(&codon);
+            }
+        }
+        let sequences = vec![format!("{run}TAA{run}"); 4];
+
+        let first =
+            find_best_shared_orf_segment(&sequences, GeneticCode::Standard, 100.0, 10, 0.0)
+                .unwrap();
+        for _ in 0..20 {
+            let again =
+                find_best_shared_orf_segment(&sequences, GeneticCode::Standard, 100.0, 10, 0.0)
+                    .unwrap();
+            assert_eq!(
+                (again.frame, again.start, again.end),
+                (first.frame, first.start, first.end)
             );
         }
     }
@@ -1440,10 +1468,10 @@ mod tests {
             min_segment_aa: 75,
             min_coding_score: 40.0,
             exclude_uce: false,
-            fail_if_no_orf: true, ..Default::default() 
+            ..Default::default()
         };
 
-        let result = optimize_open_reading_frames(&taxa, &seqs, "exon_stop_free", &config);
+        let result = optimize_open_reading_frames_guided(&taxa, &seqs, "exon_stop_free", &config, None);
         assert!(result.candidate_found);
         assert!(result.coding_score < 40.0, "score={}", result.coding_score);
         assert!(!result.found_valid_orf);

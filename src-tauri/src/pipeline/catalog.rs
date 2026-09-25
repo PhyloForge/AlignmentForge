@@ -14,7 +14,9 @@ use crate::algorithms::assess::assess_alignment;
 use crate::algorithms::informative::calculate_site_statistics;
 use crate::algorithms::orf::should_skip_orf_locus;
 use crate::algorithms::stats::{calculate_gap_stats, calculate_gc_percent, compute_mean_divergence};
-use crate::models::{Alignment, AlignmentSummary, DatasetOverview, TaxonOccupancy};
+use crate::models::{Alignment, AlignmentSummary, DatasetOverview};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::models::TaxonOccupancy;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::parsers::parse_alignment;
 use crate::pipeline::engine::apply_recipe;
@@ -80,17 +82,17 @@ pub fn recipe_without_orf_analysis(recipe: &TrimmingRecipe) -> TrimmingRecipe {
     let mut catalog_recipe = recipe.clone();
     catalog_recipe.enable_orf = false;
     catalog_recipe.orf_use_references = false;
-    catalog_recipe.fail_if_no_orf = false;
     catalog_recipe
 }
 
-/// How many directory levels below the chosen folder are searched.
+/// How many directory levels below the chosen folder are searched. The browser
+/// applies this limit and the skipped names in `isScannedPath` (src/tauriClient.ts).
 pub const MAX_SCAN_DEPTH: usize = 4;
 
 /// Extensions the scanner accepts. The browser file picker uses the same list
 /// in `SUPPORTED_ALIGNMENT_EXTENSIONS` (src/tauriClient.ts); keep them in step.
-pub const SUPPORTED_ALIGNMENT_EXTENSIONS: [&str; 11] = [
-    "fa", "fasta", "fna", "ffn", "faa", "phy", "phylip", "nex", "nexus", "aln", "txt",
+pub const SUPPORTED_ALIGNMENT_EXTENSIONS: [&str; 10] = [
+    "fa", "fasta", "fna", "ffn", "phy", "phylip", "nex", "nexus", "aln", "txt",
 ];
 
 /// One file that could not be read, reported to the user instead of dropped.
@@ -133,8 +135,10 @@ where
         .max_depth(MAX_SCAN_DEPTH)
         .into_iter()
         .filter_entry(|e| {
+            // The chosen folder itself is always read, as in the browser build.
             let name = e.file_name().to_string_lossy();
-            !name.starts_with('.') && name != "node_modules" && name != "target" && name != "__MACOSX"
+            e.depth() == 0
+                || (!name.starts_with('.') && name != "node_modules" && name != "target" && name != "__MACOSX")
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
@@ -710,21 +714,6 @@ pub fn compute_dataset_overview(summaries: &[AlignmentSummary]) -> DatasetOvervi
     }
 }
 
-/// Evaluates a TrimmingRecipe across pre-parsed in-memory Alignment objects in parallel
-#[cfg(not(target_arch = "wasm32"))]
-pub fn evaluate_recipe_on_alignments(
-    alignments: &[Alignment],
-    recipe: &TrimmingRecipe,
-    total_unique_taxa: usize,
-) -> (Vec<AlignmentSummary>, DatasetOverview) {
-    evaluate_recipe_on_alignments_with_progress(
-        alignments,
-        recipe,
-        total_unique_taxa,
-        None::<fn(usize, usize, &str)>,
-    )
-}
-
 /// Evaluates a recipe across cached alignments and reports completed loci as workers finish.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_alignments_with_progress<F>(
@@ -787,21 +776,6 @@ where
     Some((summaries, overview))
 }
 
-/// Evaluates a TrimmingRecipe across all summary entries by re-parsing from disk in parallel (fallback)
-#[cfg(not(target_arch = "wasm32"))]
-pub fn evaluate_recipe_on_summaries(
-    paths: &[String],
-    recipe: &TrimmingRecipe,
-    total_unique_taxa: usize,
-) -> (Vec<AlignmentSummary>, DatasetOverview) {
-    evaluate_recipe_on_summaries_with_progress(
-        paths,
-        recipe,
-        total_unique_taxa,
-        None::<fn(usize, usize, &str)>,
-    )
-}
-
 /// Disk-backed fallback for catalog recalculation with completed-locus progress.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_recipe_on_summaries_with_progress<F>(
@@ -847,6 +821,34 @@ mod tests {
     }
 
     #[test]
+    fn scan_reads_three_subfolder_levels_and_skips_hidden_entries() {
+        // The chosen folder itself starts with `.`, which must not stop the scan.
+        let root = std::env::temp_dir().join(".af_scan_depth_test");
+        let _ = std::fs::remove_dir_all(&root);
+        for relative in [
+            "top.fa",
+            "a/b/c/deep.fa",
+            "a/b/c/d/too_deep.fa",
+            ".hidden/skipped.fa",
+            "__MACOSX/a/skipped.fa",
+            "a/._skipped.fa",
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, ">x\nACGT\n>y\nACGA\n").unwrap();
+        }
+
+        let (summaries, _, _, _, failures) =
+            scan_alignment_directory(&root, None::<fn(usize, usize, &str)>).unwrap();
+        let mut ids: Vec<&str> = summaries.iter().map(|summary| summary.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["deep", "top"]);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_orf_sample_pruning_does_not_change_catalog_assessment() {
         let alignment = Alignment::new(
             "exon_001".to_string(),
@@ -872,7 +874,6 @@ mod tests {
         recipe.trim_hmm = false;
         recipe.enable_orf = true;
         recipe.exclude_uce = false;
-        recipe.fail_if_no_orf = true;
         recipe.stop_codon_action = StopCodonAction::RemoveSample;
         recipe.trim_external = false;
         recipe.trim_columns = false;
@@ -959,7 +960,12 @@ mod tests {
         let runtime_recipe = recipe_with_dataset_sample_filter(&recipe, &alignments);
         assert_eq!(runtime_recipe.excluded_taxa, vec!["Rare".to_string()]);
 
-        let (summaries, _) = evaluate_recipe_on_alignments(&alignments, &recipe, 2);
+        let (summaries, _) = evaluate_recipe_on_alignments_with_progress(
+            &alignments,
+            &recipe,
+            2,
+            None::<fn(usize, usize, &str)>,
+        );
         assert_eq!(summaries[0].num_taxa, 1);
         assert_eq!(summaries[1].num_taxa, 1);
     }

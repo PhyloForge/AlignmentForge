@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = join(ROOT, 'public/example_data');
-const EXTENSIONS = ['.fa', '.fasta', '.fna', '.ffn', '.faa', '.phy', '.phylip', '.nex', '.nexus'];
+const EXTENSIONS = ['.fa', '.fasta', '.fna', '.ffn', '.phy', '.phylip', '.nex', '.nexus'];
 
 const isAlignment = (name) => EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext));
 

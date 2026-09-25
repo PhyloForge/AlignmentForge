@@ -32,7 +32,7 @@ pub struct TrimmingRecipe {
     #[serde(default = "default_hmm_island_len")]
     pub hmm_min_island_length: usize,
 
-    // Step 3b: Sliding Window Segment Masking
+    // Step 3b: Fixed-Window Segment Masking
     pub trim_segments: bool,
     pub segment_window_size: usize,
     pub segment_threshold: f64,
@@ -69,9 +69,7 @@ pub struct TrimmingRecipe {
     pub orf_min_coding_score: f64,
     #[serde(default = "default_true")]
     pub exclude_uce: bool,
-    // Defaults to false to match `TrimmingRecipe::default()` and every preset.
-    // A `default_true` here silently enabled the check for any config file that
-    // omitted the key.
+    // No code reads this field. It stays so that older config files still load.
     #[serde(default)]
     pub fail_if_no_orf: bool,
     #[serde(default)]

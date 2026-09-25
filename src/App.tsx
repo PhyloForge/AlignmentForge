@@ -62,7 +62,6 @@ function sequenceProcessingRecipeKey(recipe: TrimmingRecipe): string {
   delete processingFields.min_pis_percent;
   delete processingFields.min_variable_count;
   delete processingFields.min_variable_percent;
-  delete processingFields.fail_if_no_orf;
   return JSON.stringify(processingFields);
 }
 
@@ -118,7 +117,7 @@ export const App: React.FC = () => {
   const [viewData, setViewData] = useState<AlignmentViewResponse | null>(null);
   const [alignmentLoadError, setAlignmentLoadError] = useState<string | null>(null);
   const [parseFailures, setParseFailures] = useState<ParseFailure[]>([]);
-  /** Per-sample retention, loaded only while the QC view needs it. */
+  /** Per-sample retention, loaded only while the QC or Matrix view needs it. */
   const [retentionSummaries, setRetentionSummaries] = useState<AlignmentSummary[] | null>(null);
   const [showParseFailures, setShowParseFailures] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -142,7 +141,6 @@ export const App: React.FC = () => {
       colorScheme: 'chemistry',
       dimConsensusMatches: false,
     });
-  const [showDiffOverlay, setShowDiffOverlay] = useState<boolean>(true);
   // Held here so changing the recipe, which reloads the alignment view, does
   // not clear the highlighted sample.
   const [selectedTaxon, setSelectedTaxon] = useState<string | null>(null);
@@ -481,10 +479,11 @@ export const App: React.FC = () => {
     setShowParseFailures(parseFailures.length > 0);
   }, [parseFailures]);
 
-  // The occupancy chart is the only view that needs per-sample retention, so it
-  // is fetched when that view opens rather than carried on every recalculation.
+  // Only the occupancy chart and the Matrix view need per-sample retention, so
+  // the browser fetches it when one of them opens rather than carrying it on
+  // every recalculation. Desktop summaries already carry it.
   useEffect(() => {
-    if (activeView !== 'qc' || isTauri || summaries.length === 0) {
+    if ((activeView !== 'qc' && activeView !== 'matrix') || isTauri || summaries.length === 0) {
       setRetentionSummaries(null);
       return;
     }
@@ -721,7 +720,6 @@ export const App: React.FC = () => {
       <Header
         currentPath={currentPath}
         totalAlignments={overview.total_alignments}
-        passedAlignments={overview.passed_alignments}
         activeView={activeView}
         onSelectView={handleSelectHeaderView}
         onOpenDirectory={handleOpenDirectory}
@@ -948,7 +946,7 @@ export const App: React.FC = () => {
             {activeView === 'matrix' && (
               <MatrixHeatmap
                 occupancy={occupancy}
-                summaries={summaries}
+                summaries={retentionSummaries ?? summaries}
                 onSelectLocus={(id: string, filePath: string) =>
                   handleSelectLocusAndSwitchView(id, filePath, 'catalog')
                 }
@@ -1002,8 +1000,6 @@ export const App: React.FC = () => {
                   viewData={viewData}
                   colorScheme={colorScheme}
                   onChangeColorScheme={setColorScheme}
-                  showDiffOverlay={showDiffOverlay}
-                  onToggleDiffOverlay={() => setShowDiffOverlay((v) => !v)}
                   geneticCode={activeRecipe.genetic_code}
                   aminoAcidViewerSettings={aminoAcidViewerSettings}
                   onChangeAminoAcidViewerSettings={setAminoAcidViewerSettings}

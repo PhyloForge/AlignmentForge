@@ -118,15 +118,12 @@ pub fn convert_ambiguous_consensus(
                 return sequences.to_vec();
             }
             let length = sequences[0].len();
-            let _num_seqs = sequences.len();
 
-            // Find majority unambiguous base per column
-            let mut majority_bases = Vec::with_capacity(length);
-            for col in 0..length {
-                let mut counts = [0usize; 4]; // A, C, G, T
-                for seq in sequences {
-                    let b = seq.as_bytes().get(col).copied().unwrap_or(b'-').to_ascii_uppercase();
-                    match b {
+            // Count the unambiguous bases per column, in A, C, G, T order.
+            let mut column_counts = vec![[0usize; 4]; length];
+            for seq in sequences {
+                for (counts, base) in column_counts.iter_mut().zip(seq.bytes()) {
+                    match base.to_ascii_uppercase() {
                         b'A' => counts[0] += 1,
                         b'C' => counts[1] += 1,
                         b'G' => counts[2] += 1,
@@ -134,19 +131,6 @@ pub fn convert_ambiguous_consensus(
                         _ => {}
                     }
                 }
-                let max_idx = counts
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, count)| *count)
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(0);
-                let maj_char = match max_idx {
-                    0 => 'A',
-                    1 => 'C',
-                    2 => 'G',
-                    _ => 'T',
-                };
-                majority_bases.push(maj_char);
             }
 
             sequences
@@ -157,18 +141,47 @@ pub fn convert_ambiguous_consensus(
                             // Match on the uppercase form but return the original
                             // character, otherwise this strategy also rewrites the
                             // case of every unambiguous base in the alignment.
-                            match c.to_ascii_uppercase() {
-                                'R' | 'Y' | 'S' | 'W' | 'K' | 'M' | 'B' | 'D' | 'H' | 'V' => {
-                                    majority_bases.get(col).copied().unwrap_or('A')
+                            let Some(allowed) = allowed_bases(c.to_ascii_uppercase()) else {
+                                return c;
+                            };
+                            // Use the most common base in the column that the code
+                            // allows; a tie goes to the first in A, C, G, T order.
+                            // With no allowed base in the column, keep the code.
+                            let counts = column_counts.get(col).copied().unwrap_or_default();
+                            let mut best: Option<usize> = None;
+                            for base in 0..4 {
+                                if allowed[base]
+                                    && counts[base] > 0
+                                    && best.is_none_or(|current| counts[base] > counts[current])
+                                {
+                                    best = Some(base);
                                 }
-                                _ => c,
                             }
+                            best.map_or(c, |base| ['A', 'C', 'G', 'T'][base])
                         })
                         .collect()
                 })
                 .collect()
         }
     }
+}
+
+/// The bases that an IUPAC ambiguity code allows, as flags in A, C, G, T order.
+fn allowed_bases(code: char) -> Option<[bool; 4]> {
+    let allowed = match code {
+        'R' => [true, false, true, false],
+        'Y' => [false, true, false, true],
+        'S' => [false, true, true, false],
+        'W' => [true, false, false, true],
+        'K' => [false, false, true, true],
+        'M' => [true, true, false, false],
+        'B' => [false, true, true, true],
+        'D' => [true, false, true, true],
+        'H' => [true, true, false, true],
+        'V' => [true, true, true, false],
+        _ => return None,
+    };
+    Some(allowed)
 }
 
 #[cfg(test)]
@@ -186,6 +199,21 @@ mod tests {
         // Only the ambiguity code changes; every other base keeps its case.
         assert_eq!(out[0], "acgtA");
         assert_eq!(out[1], "acgta");
+    }
+
+    #[test]
+    fn majority_base_uses_only_bases_that_the_code_allows() {
+        // Column 0: R with G, G, A gives G. Column 1: R with A, G gives A (tie).
+        // Column 2: R with only T keeps R. Column 3: only R keeps R.
+        let seqs = vec![
+            "RRRR".to_string(),
+            "GATR".to_string(),
+            "GGTR".to_string(),
+            "ATTR".to_string(),
+        ];
+        let out = convert_ambiguous_consensus(&seqs, AmbiguityStrategy::MajorityBase);
+        assert_eq!(out[0], "GARR");
+        assert_eq!(out[3], "ATTR");
     }
 
     #[test]

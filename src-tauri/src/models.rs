@@ -211,6 +211,12 @@ pub struct TrimmingDiff {
     pub orf_reference_coverage: f64,
     #[serde(default)]
     pub orf_intron_length: usize,
+    /// Raw columns of the reference-matched exon, when the final ORF used that
+    /// span. Batch export cuts the intron alignment outside it.
+    #[serde(default)]
+    pub reference_exon_start: Option<usize>,
+    #[serde(default)]
+    pub reference_exon_end: Option<usize>,
     pub pass: bool,
     pub fail_reasons: Vec<String>,
 }

@@ -1,5 +1,4 @@
 pub mod assess;
-pub mod collapse;
 pub mod columns;
 pub mod coverage;
 pub mod external;

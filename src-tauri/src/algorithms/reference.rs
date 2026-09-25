@@ -277,29 +277,30 @@ pub fn match_reference_to_alignment(sequences: &[String], reference: &str) -> Op
     })
 }
 
-pub fn intron_alignment_from_reference(
+/// Builds the intron alignment from the columns before `exon_start` and from
+/// `exon_end` on. The exon span comes from the engine's reference match.
+pub fn intron_alignment_outside(
     alignment: &Alignment,
-    reference: &str,
-) -> Option<(Alignment, ReferenceMatch)> {
-    let reference_match = match_reference_to_alignment(&alignment.sequences, reference)?;
+    exon_start: usize,
+    exon_end: usize,
+) -> Alignment {
     let sequences = alignment
         .sequences
         .iter()
         .map(|sequence| {
-            let prefix = sequence.get(..reference_match.start).unwrap_or_default();
-            let suffix = sequence.get(reference_match.end..).unwrap_or_default();
+            let prefix = sequence.get(..exon_start).unwrap_or_default();
+            let suffix = sequence.get(exon_end..).unwrap_or_default();
             format!("{prefix}{suffix}")
         })
         .collect::<Vec<_>>();
-    let intron = Alignment::new(
+    Alignment::new(
         format!("{}_intron", alignment.id),
         format!("{}_intron", alignment.file_name),
         alignment.file_path.clone(),
         alignment.format,
         alignment.taxa.clone(),
         sequences,
-    );
-    Some((intron, reference_match))
+    )
 }
 
 #[cfg(test)]
@@ -323,10 +324,11 @@ mod tests {
             ],
         );
 
-        let (intron, matched) = intron_alignment_from_reference(&alignment, exon).unwrap();
+        let matched = match_reference_to_alignment(&alignment.sequences, exon).unwrap();
         assert_eq!(matched.start, 6);
         assert_eq!(matched.end, 6 + exon.len());
         assert!(matched.identity_percent > 99.0);
+        let intron = intron_alignment_outside(&alignment, matched.start, matched.end);
         assert_eq!(intron.sequences[0], "CCCCCCGGGGGG");
     }
 

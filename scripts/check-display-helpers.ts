@@ -41,6 +41,7 @@ check('ambiguous codon', translateClientCodon('tan', 'standard'), 'X');
 
 // Locus skipping must match `should_skip_orf_locus` in the engine.
 check('uce locus skipped', shouldSkipOrfLocus('uce-0044', 'continuouscds'), true);
+check('prefixed uce locus skipped', shouldSkipOrfLocus('anura-05637_uce-0016', 'continuouscds'), true);
 check('intron locus skipped', shouldSkipOrfLocus('gene_intron_1', 'continuouscds'), true);
 check('exon locus kept', shouldSkipOrfLocus('anura-00037_ppan', 'continuouscds'), false);
 check('supercontig skipped for continuous', shouldSkipOrfLocus('x_supercontig', 'continuouscds'), true);

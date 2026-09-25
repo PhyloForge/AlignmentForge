@@ -19,7 +19,6 @@ import iconLight from '../assets/icon-light.png';
 interface HeaderProps {
   currentPath: string | null;
   totalAlignments: number;
-  passedAlignments: number;
   activeView: ViewMode;
   onSelectView: (view: ViewMode) => void;
   onOpenDirectory: () => void;
@@ -31,7 +30,6 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   currentPath,
   totalAlignments,
-  passedAlignments,
   activeView,
   onSelectView,
   onOpenDirectory,

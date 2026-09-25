@@ -4,11 +4,8 @@ import {
   ZoomOut,
   Palette,
   Eye,
-  Sliders,
   Sparkles,
-  Settings2,
   Check,
-  MoveHorizontal,
   Info,
   CheckCircle,
   XCircle,
@@ -22,7 +19,6 @@ import {
   AminoAcidViewerSettings,
   ColorScheme,
   GeneticCode,
-  StopCodonPos,
 } from '../types';
 import { translateClientCodon } from '../sequenceDisplay';
 
@@ -30,8 +26,6 @@ interface MsaViewerProps {
   viewData: AlignmentViewResponse;
   colorScheme: ColorScheme;
   onChangeColorScheme: (scheme: ColorScheme) => void;
-  showDiffOverlay: boolean;
-  onToggleDiffOverlay: () => void;
   geneticCode: GeneticCode;
   aminoAcidViewerSettings: AminoAcidViewerSettings;
   onChangeAminoAcidViewerSettings: (settings: AminoAcidViewerSettings) => void;
@@ -318,8 +312,6 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
   viewData,
   colorScheme,
   onChangeColorScheme,
-  showDiffOverlay,
-  onToggleDiffOverlay,
   geneticCode,
   aminoAcidViewerSettings,
   onChangeAminoAcidViewerSettings,
@@ -332,12 +324,13 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
   alignmentPosition,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
 
   const [charWidth, setCharWidth] = useState<number>(12); // px per character
-  const [charHeight, setCharHeight] = useState<number>(18); // px per row
+  const charHeight = 18; // px per row (fixed)
   const [scrollX, setScrollX] = useState<number>(0);
   const [scrollY, setScrollY] = useState<number>(0);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
 
   // Mouse Drag Panning State
   const [isDragging, setIsDragging] = useState<boolean>(false);
@@ -438,37 +431,8 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     if (aminoAcidMode) return [];
     const annotatedStops =
       effectiveViewMode === 'final' ? diff.final_stop_codons : diff.stop_codons;
-    if (annotatedStops !== undefined) {
-      return annotatedStops;
-    }
-    const list: StopCodonPos[] = [];
-    for (let r = 0; r < activeTaxa.length; r++) {
-      const taxon = activeTaxa[r];
-      const seq = activeSeqs[r] || '';
-      let col = 0;
-      while (col + 2 < seq.length) {
-        const triplet = (seq[col] + seq[col + 1] + seq[col + 2]).toUpperCase();
-        if (['TAA', 'TAG', 'TGA', 'UAA', 'UAG', 'UGA'].includes(triplet)) {
-          const isTerminal =
-            col + 3 >= seq.length ||
-            seq
-              .slice(col + 3)
-              .split('')
-              .every((c) => c === '-' || c === '?');
-          list.push({ taxon, start: col, end: col + 3, codon: triplet, is_terminal: isTerminal });
-        }
-        col += 3;
-      }
-    }
-    return list;
-  }, [
-    aminoAcidMode,
-    effectiveViewMode,
-    diff.stop_codons,
-    diff.final_stop_codons,
-    activeTaxa,
-    activeSeqs,
-  ]);
+    return annotatedStops ?? [];
+  }, [aminoAcidMode, effectiveViewMode, diff.stop_codons, diff.final_stop_codons]);
 
   // Auto-calculated Taxon Label Width based on longest taxon name
   const autoTaxaWidth = useMemo(() => {
@@ -500,12 +464,23 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     [numTaxa, charHeight, topHeaderHeight]
   );
 
-  // Zooming out shrinks the content, which can leave the previous offset past
-  // the new end of the alignment.
+  // Redraw when the window or the layout changes the canvas size.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => {
+      setCanvasSize({ width: canvas.clientWidth, height: canvas.clientHeight });
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  // Zooming out or a larger window can leave the previous offset past the new
+  // end of the alignment.
   useEffect(() => {
     setScrollX((prev) => clampScrollX(prev));
     setScrollY((prev) => clampScrollY(prev));
-  }, [clampScrollX, clampScrollY]);
+  }, [clampScrollX, clampScrollY, canvasSize]);
 
   // Handle Drag Resizing of Taxon Column Divider
   const handleDividerMouseDown = (e: React.MouseEvent) => {
@@ -583,13 +558,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         const char = seq ? seq[c] || '-' : '-';
         const uChar = char.toUpperCase();
         const consChar = displayConsensus[c] || '-';
-        const isTrimmedCol =
-          effectiveViewMode === 'overlays' && showDiffOverlay && trimmedColsSet.has(c);
-
-        // Check if part of a stop codon
-        const isStopCodon = stopCodonsList.some(
-          (sc) => sc.taxon === taxonName && c >= sc.start && c < sc.end
-        );
+        const isTrimmedCol = effectiveViewMode === 'overlays' && trimmedColsSet.has(c);
 
         // Color cell background or text
         let fillColor = '#171b22';
@@ -685,7 +654,6 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
         // HMM / Segment Masked Overlay: Purple/Indigo diagonal hatch
         const isMaskedSeg =
           effectiveViewMode === 'overlays' &&
-          showDiffOverlay &&
           diff.masked_segments.some(
             (seg) => seg.taxon === taxonName && c >= seg.start && c < seg.end
           );
@@ -704,7 +672,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
       }
 
       // Dropped Taxon Ghost Mask (in overlays view mode)
-      if (effectiveViewMode === 'overlays' && showDiffOverlay && isDropped) {
+      if (effectiveViewMode === 'overlays' && isDropped) {
         ctx.fillStyle = activeOverlay.fill;
         ctx.fillRect(taxaNameWidth, rowY, width - taxaNameWidth, charHeight);
       }
@@ -761,7 +729,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
-      if (effectiveViewMode === 'overlays' && showDiffOverlay && isDropped) {
+      if (effectiveViewMode === 'overlays' && isDropped) {
         ctx.fillStyle = '#94a3b8';
         const label = `✖ ${taxonName}`;
         ctx.fillText(label, 10, rowY + charHeight / 2);
@@ -828,8 +796,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     // Ruler Ticks and PIS Indicators
     for (let c = startCol; c < endCol; c++) {
       const colX = taxaNameWidth + (c * charWidth - scrollX);
-      const isTrimmedCol =
-        effectiveViewMode === 'overlays' && showDiffOverlay && trimmedColsSet.has(c);
+      const isTrimmedCol = effectiveViewMode === 'overlays' && trimmedColsSet.has(c);
       const isPis = !aminoAcidMode && effectiveViewMode === 'overlays' && pis_mask[c];
 
       // Protein positions are more compact, so label every 10 residues.
@@ -875,7 +842,6 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     charWidth,
     charHeight,
     colorScheme,
-    showDiffOverlay,
     effectiveViewMode,
     overlayColor,
     numTaxa,
@@ -889,22 +855,31 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
     aminoAcidViewerSettings.dimConsensusMatches,
     selectedTaxon,
     discardedSet,
+    canvasSize,
   ]);
 
-  // Mouse Wheel Pan / Scroll
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
-      if (e.deltaY < 0) {
-        setCharWidth((w) => Math.min(32, w + 1));
+  // Mouse Wheel Pan / Scroll, and Ctrl/Cmd + wheel zoom. React registers wheel
+  // listeners as passive, where preventDefault cannot stop the page zoom, so
+  // this uses a native listener.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        if (e.deltaY < 0) {
+          setCharWidth((w) => Math.min(32, w + 1));
+        } else {
+          setCharWidth((w) => Math.max(1, w - 1));
+        }
       } else {
-        setCharWidth((w) => Math.max(1, w - 1));
+        setScrollX((prev) => clampScrollX(prev + e.deltaX));
+        setScrollY((prev) => clampScrollY(prev + e.deltaY));
       }
-    } else {
-      setScrollX((prev) => clampScrollX(prev + e.deltaX));
-      setScrollY((prev) => clampScrollY(prev + e.deltaY));
-    }
-  };
+    };
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+    return () => viewport.removeEventListener('wheel', handleWheel);
+  }, [clampScrollX, clampScrollY]);
 
   const handleMouseDownCanvas = (e: React.MouseEvent<HTMLCanvasElement>) => {
     setIsDragging(true);
@@ -1348,8 +1323,7 @@ export const MsaViewer: React.FC<MsaViewerProps> = ({
 
       {/* Main Canvas Viewport */}
       <div
-        ref={containerRef}
-        onWheel={handleWheel}
+        ref={viewportRef}
         className={`flex-1 w-full h-full relative overflow-hidden bg-[#0e1014] ${
           isDragging ? 'cursor-grabbing' : 'cursor-crosshair'
         }`}

@@ -6,7 +6,7 @@ import { GeneticCode, TrimmingRecipe } from './types';
  * Alignment processing happens in the engine, compiled to WebAssembly. These
  * two functions stay in TypeScript because the canvas needs them per frame,
  * where a round trip to a worker for every codon would not be practical.
- * `npm run parity:codons` checks the translator against the engine's rules.
+ * `npm run check:display` checks both against the engine's rules.
  */
 
 const STANDARD_AMINO_ACIDS: Record<string, string> = {
@@ -47,10 +47,14 @@ export function shouldSkipOrfLocus(
   searchMode: TrimmingRecipe['orf_search_mode'] = 'continuouscds'
 ): boolean {
   const lower = locusId.toLowerCase();
-  const alwaysSkip =
-    lower.startsWith('uce-') ||
-    lower.startsWith('uce_') ||
+  // `uce` is a token at the start of the ID or after `_`, `-`, or `.`.
+  const hasUceToken =
     lower.startsWith('uce') ||
+    lower.includes('_uce') ||
+    lower.includes('-uce') ||
+    lower.includes('.uce');
+  const alwaysSkip =
+    hasUceToken ||
     lower.includes('noncoding') ||
     lower.includes('non-coding') ||
     lower.includes('intergenic') ||

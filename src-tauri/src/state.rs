@@ -63,15 +63,6 @@ impl AlignmentCache {
         map.get(file_path).cloned()
     }
 
-    /// Get clones of all cached alignments.
-    ///
-    /// This copies every sequence in the dataset. Prefer `taxon_presence` when
-    /// only the sample names are needed.
-    pub fn get_all(&self) -> Vec<Alignment> {
-        let map = self.lock();
-        map.values().cloned().collect()
-    }
-
     /// Taxon names per locus, without copying any sequence data.
     pub fn taxon_presence(&self) -> TaxonPresence {
         let map = self.lock();
@@ -84,15 +75,6 @@ impl AlignmentCache {
             .flat_map(|alignment| alignment.taxa.iter())
             .collect::<HashSet<_>>()
             .len()
-    }
-
-    /// Number of cached alignments.
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// True when an alignment with this path is cached.

@@ -4,9 +4,10 @@ import { TrimmingRecipe } from './types';
  * The default trimming recipe.
  *
  * This is the single definition used by the browser build. It must stay in step
- * with `TrimmingRecipe::default()` in `src-tauri/src/pipeline/recipe.rs`; the
- * Rust preset tests and the TypeScript type check protect this shared contract. The desktop build
- * replaces this with the presets returned by the `get_presets` command.
+ * with `TrimmingRecipe::default()` in `src-tauri/src/pipeline/recipe.rs`. The
+ * TypeScript type check covers the field names and types, but no test compares
+ * the values. The desktop build replaces this with the presets returned by the
+ * `get_presets` command.
  */
 export const DEFAULT_RECIPE: TrimmingRecipe = {
   name: 'AlignmentForge Default',

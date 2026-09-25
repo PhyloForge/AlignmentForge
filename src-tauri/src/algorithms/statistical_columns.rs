@@ -150,9 +150,10 @@ pub fn compute_column_gap_fraction(sequences: &[String], col: usize) -> f64 {
 
 /// Statistical Column Trimming Engine
 /// Supports:
-/// 1. trimAl Similarity & Sliding Window Consistency (Custom & Automated Heuristics)
-/// 2. Gblocks Conserved Block Segmentation
-/// 3. Shannon Information Entropy
+/// 1. Column similarity, smoothed over a sliding window, with a custom cutoff
+///    or a threshold set from the mean similarity
+/// 2. Conserved block segmentation
+/// 3. Shannon information entropy
 pub fn trim_statistical_columns(
     sequences: &[String],
     method: StatisticalColumnMethod,
@@ -187,7 +188,7 @@ pub fn trim_statistical_columns(
             let effective_threshold = match heuristic {
                 TrimalHeuristic::Custom => similarity_threshold,
                 TrimalHeuristic::Gappyout => {
-                    // gappyout automatically focuses on columns above average alignment similarity
+                    // The threshold is 75% of the mean smoothed similarity.
                     let avg: f64 = smoothed_scores.iter().sum::<f64>() / length.max(1) as f64;
                     (avg * 0.75).clamp(0.15, 0.60)
                 }
@@ -217,19 +218,19 @@ pub fn trim_statistical_columns(
                     dropped_cols.push(col);
                     let label = match heuristic {
                         TrimalHeuristic::Custom => format!(
-                            "trimAl Similarity ({:.2} < min {:.2}, win={})",
+                            "Column Similarity ({:.2} < min {:.2}, win={})",
                             score, effective_threshold, window_size
                         ),
                         TrimalHeuristic::Gappyout => format!(
-                            "trimAl Gappyout (Score {:.2}, Gap {:.0}%)",
+                            "Similarity and Gap Heuristic (Score {:.2}, Gap {:.0}%)",
                             score, gap_frac * 100.0
                         ),
                         TrimalHeuristic::Strict => format!(
-                            "trimAl Strict (Score {:.2}, Gap {:.0}%)",
+                            "Strict Similarity and Gap Heuristic (Score {:.2}, Gap {:.0}%)",
                             score, gap_frac * 100.0
                         ),
                         TrimalHeuristic::StrictPlus => format!(
-                            "trimAl StrictPlus (Score {:.2}, Gap {:.0}%)",
+                            "Strict Plus Similarity and Gap Heuristic (Score {:.2}, Gap {:.0}%)",
                             score, gap_frac * 100.0
                         ),
                     };
@@ -292,9 +293,9 @@ pub fn trim_statistical_columns(
                 if !block_membership[c] {
                     dropped_cols.push(c);
                     let reason = if !is_conserved[c] {
-                        format!("Gblocks Non-Conserved / Gap (sim {:.2})", raw_scores[c])
+                        format!("Conserved Blocks: Non-Conserved / Gap (sim {:.2})", raw_scores[c])
                     } else {
-                        format!("Gblocks Fragment (< {} bp conserved block)", min_block_length)
+                        format!("Conserved Blocks: Fragment (< {} bp conserved block)", min_block_length)
                     };
                     reasons.insert(c, reason);
                 }

@@ -27,7 +27,6 @@ export const SUPPORTED_ALIGNMENT_EXTENSIONS = [
   'fasta',
   'fna',
   'ffn',
-  'faa',
   'phy',
   'phylip',
   'nex',
@@ -35,6 +34,25 @@ export const SUPPORTED_ALIGNMENT_EXTENSIONS = [
   'aln',
   'txt',
 ] as const;
+
+/** Folder levels that the desktop scan reads below the chosen folder. */
+const MAX_SCAN_DEPTH = 4;
+const SKIPPED_SCAN_NAMES = ['node_modules', 'target', '__MACOSX'];
+
+/**
+ * Applies the desktop scan rules to a picked or dropped file: at most
+ * `MAX_SCAN_DEPTH` levels below the chosen folder, and no hidden or build
+ * folder or file (for example `__MACOSX/._locus.phy`).
+ */
+function isScannedPath(relativePath: string): boolean {
+  const parts = relativePath.split('/').filter(Boolean);
+  // The first part is the chosen folder, which the desktop scan always reads.
+  const below = parts.length > 1 ? parts.slice(1) : parts;
+  return (
+    below.length <= MAX_SCAN_DEPTH &&
+    below.every((part) => !part.startsWith('.') && !SKIPPED_SCAN_NAMES.includes(part))
+  );
+}
 
 let catalogJobCounter = 0;
 
@@ -182,37 +200,10 @@ export async function exportAlignmentStatsCsv(
 }
 
 export async function scanDirectory(dirPath: string): Promise<ScanResponse> {
-  if (isTauri) {
-    return invokeTauri<ScanResponse>('scan_directory', { dirPath });
-  } else {
-    if (enginePool.hasDataset()) {
-      const [summaries, occupancy] = await Promise.all([
-        enginePool.summarize(DEFAULT_RECIPE),
-        enginePool.occupancy(),
-      ]);
-      return {
-        summaries,
-        overview: buildDatasetOverviewFromSummaries(summaries, occupancy.length),
-        occupancy,
-      };
-    }
-    return {
-      summaries: [],
-      overview: {
-        total_alignments: 0,
-        passed_alignments: 0,
-        discarded_alignments: 0,
-        total_unique_taxa: 0,
-        mean_taxa: 0,
-        mean_length: 0,
-        mean_gap_percent: 0,
-        mean_pis: 0,
-        total_matrix_basepairs: 0,
-      },
-      occupancy: [],
-      parse_failures: [],
-    };
+  if (!isTauri) {
+    throw new Error('Loading a folder by path is available in the desktop app.');
   }
+  return invokeTauri<ScanResponse>('scan_directory', { dirPath });
 }
 
 export async function loadDirectoryFromFiles(
@@ -222,7 +213,10 @@ export async function loadDirectoryFromFiles(
 ): Promise<{ dirName: string; scanResponse: ScanResponse }> {
   const fileArray = Array.from(files).filter((file) => {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    return (SUPPORTED_ALIGNMENT_EXTENSIONS as readonly string[]).includes(ext);
+    return (
+      (SUPPORTED_ALIGNMENT_EXTENSIONS as readonly string[]).includes(ext) &&
+      isScannedPath(file.webkitRelativePath || file.name)
+    );
   });
 
   const total = fileArray.length;
@@ -449,41 +443,50 @@ export async function loadDirectoryFromUrl(
 
   const dirName = safePath.split('/').filter(Boolean).pop() || 'Example Alignments';
   const total = files.length;
-  const inputs: AlignmentInput[] = [];
-  const fetchFailures: ParseFailure[] = [];
+  // Results go into slots by manifest index, so the locus order does not
+  // depend on which download finishes first.
+  const inputSlots: (AlignmentInput | undefined)[] = new Array(total);
+  const failureSlots: (ParseFailure | undefined)[] = new Array(total);
   const BATCH_SIZE = 10;
 
   for (let i = 0; i < total; i += BATCH_SIZE) {
     const chunk = files.slice(i, i + BATCH_SIZE);
     await Promise.all(
-      chunk.map(async (fileName) => {
+      chunk.map(async (fileName, offset) => {
         const baseName = fileName.split('/').pop() || fileName;
         try {
           const res = await fetch(`${safePath}/${fileName}`);
           if (!res.ok) throw new Error(`Failed to fetch ${fileName}`);
-          inputs.push({
+          inputSlots[i + offset] = {
             content: await res.text(),
             id: baseName.replace(/\.[^/.]+$/, ''),
             file_name: baseName,
             file_path: fileName,
-          });
+          };
         } catch (e) {
-          fetchFailures.push({
+          failureSlots[i + offset] = {
             file_name: baseName,
             file_path: fileName,
             error: e instanceof Error ? e.message : String(e),
-          });
+          };
         }
       })
     );
     onProgress?.(Math.min(total, i + BATCH_SIZE) / 2, total, chunk[chunk.length - 1] || '');
   }
 
+  const inputs = inputSlots.filter((input): input is AlignmentInput => input !== undefined);
+  const fetchFailures = failureSlots.filter(
+    (failure): failure is ParseFailure => failure !== undefined
+  );
   if (inputs.length === 0) {
     throw new Error('None of the manifest files could be downloaded.');
   }
 
-  const scanResponse = await loadIntoEngine(inputs, recipe, total, onProgress);
+  // Downloads used the first half of the progress bar; parsing uses the second.
+  const scanResponse = await loadIntoEngine(inputs, recipe, total, (current, count, fileName) =>
+    onProgress?.((total + current) / 2, count, fileName)
+  );
   return {
     dirName,
     scanResponse: {

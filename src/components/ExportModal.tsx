@@ -5,9 +5,6 @@ import {
   Layers,
   FolderOpen,
   CheckCircle,
-  FileSpreadsheet,
-  FileCode,
-  FileText,
   AlertTriangle,
 } from 'lucide-react';
 import {
@@ -59,13 +56,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   allPaths,
   recipe,
 }) => {
-  const [outputDir, setOutputDir] = useState<string>('output/trimmed_alignments');
-  const [batchParentDir, setBatchParentDir] = useState<string>('output');
+  // Destinations start empty: a packaged app has no useful working directory.
+  const [outputDir, setOutputDir] = useState<string>('');
+  const [batchParentDir, setBatchParentDir] = useState<string>('');
   const [batchOutputFolderName, setBatchOutputFolderName] = useState<string>('trimmed_alignments');
   const [generalAlignmentFolderName, setGeneralAlignmentFolderName] = useState<string>('all_alignments');
   const [orfAlignmentFolderName, setOrfAlignmentFolderName] = useState<string>('orf_alignments');
   const [intronFolderName, setIntronFolderName] = useState<string>('intron_alignments');
-  const [outputPrefix, setOutputPrefix] = useState<string>('output/supermatrix');
+  const [outputPrefix, setOutputPrefix] = useState<string>('');
   const [geneMappingPath, setGeneMappingPath] = useState<string>('');
   const [outputFormat, setOutputFormat] = useState<AlignmentFormat>('phylip');
   const [onlyPassing, setOnlyPassing] = useState<boolean>(true);
@@ -75,9 +73,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const [saveSummaryCsv, setSaveSummaryCsv] = useState<boolean>(true);
   const [saveRecipeJson, setSaveRecipeJson] = useState<boolean>(true);
-  const [exportIntrons, setExportIntrons] = useState<boolean>(
-    recipe.enable_orf && recipe.orf_use_references && Object.keys(recipe.orf_reference_sequences ?? {}).length > 0
-  );
+  // Intron export needs the exon span that a reference ORF mode finds.
+  const canExportIntrons =
+    recipe.enable_orf &&
+    recipe.orf_use_references &&
+    (recipe.orf_search_mode === 'referenceguided' ||
+      recipe.orf_search_mode === 'referencecandidateorf') &&
+    Object.keys(recipe.orf_reference_sequences ?? {}).length > 0;
+  const [exportIntrons, setExportIntrons] = useState<boolean>(canExportIntrons);
   const [writeRaxmlPartitions, setWriteRaxmlPartitions] = useState<boolean>(true);
   const [writeNexusPartitions, setWriteNexusPartitions] = useState<boolean>(true);
 
@@ -91,6 +94,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     exportScope === 'selected' && selectedPaths.length > 0 ? selectedPaths : allPaths;
 
   const batchOutputDir = joinDirectory(batchParentDir, batchOutputFolderName.trim());
+  const destination =
+    mode === 'batch' ? batchParentDir : mode === 'group' ? outputDir : outputPrefix;
 
   const handlePickOutputDir = async () => {
     const picked = await openSaveDirectoryDialog();
@@ -127,7 +132,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         const activeFolderNames = [
           exportGeneralAlignments ? generalFolderName : null,
           exportOrfAlignments && recipe.enable_orf ? orfFolderName : null,
-          exportIntrons ? intronName : null,
+          exportIntrons && canExportIntrons ? intronName : null,
         ].filter((name): name is string => name !== null);
         if (new Set(activeFolderNames.map((name) => name.toLocaleLowerCase())).size !== activeFolderNames.length) {
           throw new Error('Exported alignment folders must have different names.');
@@ -144,7 +149,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           export_orf_alignments: exportOrfAlignments,
           save_recipe_json: saveRecipeJson,
           save_summary_csv: saveSummaryCsv,
-          export_introns: exportIntrons,
+          export_introns: exportIntrons && canExportIntrons,
         };
         const res = await runBatchExport(config, recipe);
         setBatchResult(res);
@@ -342,7 +347,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    value={mode === 'batch' ? batchParentDir : mode === 'group' ? outputDir : outputPrefix}
+                    value={destination}
+                    placeholder="Choose a folder with Browse"
                     onChange={(e) =>
                       mode === 'batch'
                         ? setBatchParentDir(e.target.value)
@@ -406,7 +412,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     </label>
                   </div>
                   <div className="text-[10px] font-mono text-[#6e7681] break-all">
-                    Output: {batchOutputDir || '—'}
+                    Output: {batchParentDir.trim() ? batchOutputDir : '—'}
                   </div>
                 </div>
               )}
@@ -487,7 +493,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                         </span>
                       </label>
                     )}
-                    {recipe.enable_orf && recipe.orf_use_references && Object.keys(recipe.orf_reference_sequences ?? {}).length > 0 && (
+                    {canExportIntrons && (
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
                           type="checkbox"
@@ -569,8 +575,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </button>
                 <button
                   onClick={handleExecuteExport}
-                  disabled={isRunning || !isTauri}
-                  title={isTauri ? undefined : DESKTOP_ONLY_EXPORT_MESSAGE}
+                  disabled={isRunning || !isTauri || !destination.trim()}
+                  title={
+                    !isTauri
+                      ? DESKTOP_ONLY_EXPORT_MESSAGE
+                      : !destination.trim()
+                        ? 'Choose an output destination first'
+                        : undefined
+                  }
                   className="px-4 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
                   {isRunning ? (

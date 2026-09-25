@@ -87,18 +87,6 @@ pub fn calculate_parsimony_informative_sites(
     (stats.pis_count, stats.pis_percent, stats.pis_mask)
 }
 
-pub fn calculate_variable_sites(
-    sequences: &[String],
-    exclude_ambiguities: bool,
-) -> (usize, f64, Vec<bool>) {
-    let stats = calculate_site_statistics(sequences, exclude_ambiguities);
-    (
-        stats.variable_count,
-        stats.variable_percent,
-        stats.variable_mask,
-    )
-}
-
 #[inline(always)]
 fn resolved_state(character: u8, exclude_ambiguities: bool) -> Option<u8> {
     let upper = character.to_ascii_uppercase();

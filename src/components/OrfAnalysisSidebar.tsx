@@ -2,7 +2,6 @@ import React, { useRef } from 'react';
 import { Settings2, ShieldCheck, Palette, Target, Play, Upload, Trash2, Dna, RotateCcw, ChevronDown, ChevronRight } from 'lucide-react';
 import { 
   TrimmingRecipe, 
-  StopCodonAction, 
   GeneticCode, 
   AminoAcidViewerSettings, 
   AminoAcidColorScheme,

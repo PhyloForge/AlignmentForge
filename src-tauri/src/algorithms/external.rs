@@ -2,10 +2,13 @@
 /// Trims ragged 5' and 3' exterior columns from an alignment that are covered by fewer than
 /// `min_taxa_percent` sequences.
 /// If `codon_preserving` is true, snaps both boundaries to preserve complete triplet reading frames.
+/// The frame of a column comes from `input_columns` (its column number in the input
+/// alignment) when given, else from its current position.
 pub fn trim_external(
     sequences: &[String],
     min_taxa_percent: f64,
     codon_preserving: bool,
+    input_columns: Option<&[usize]>,
 ) -> (Vec<String>, Vec<usize>, (usize, usize)) {
     if sequences.is_empty() {
         return (Vec::new(), Vec::new(), (0, 0));
@@ -56,20 +59,18 @@ pub fn trim_external(
         _ => return (vec![String::new(); num_taxa], (0..length).collect(), (0, 0)),
     };
 
-    // Codon-preserving frame adjustment
+    // Codon-preserving frame adjustment: start on the first position of a
+    // codon and end on the last position of a codon.
     if codon_preserving {
-        let rem = start % 3;
-        if rem == 1 {
-            start += 2;
-        } else if rem == 2 {
+        let frame_of = |column: usize| {
+            input_columns.and_then(|columns| columns.get(column)).copied().unwrap_or(column) % 3
+        };
+        while start < end && frame_of(start) != 0 {
             start += 1;
         }
-        if start >= end {
-            return (vec![String::new(); num_taxa], (0..length).collect(), (0, 0));
+        while end > start && frame_of(end - 1) != 2 {
+            end -= 1;
         }
-
-        // Keep the retained interval divisible by three after shifting the start.
-        end -= (end - start) % 3;
         if start >= end {
             return (vec![String::new(); num_taxa], (0..length).collect(), (0, 0));
         }
@@ -110,7 +111,7 @@ mod tests {
             "--ATGCATGC--".to_string(),
         ];
         // min 75% = 3 taxa required. Cols 0,1 only have 1 taxon. Cols 2..9 have 4 taxa. Cols 10,11 have 1 taxon.
-        let (trimmed, dropped_cols, (s, e)) = trim_external(&seqs, 75.0, false);
+        let (trimmed, dropped_cols, (s, e)) = trim_external(&seqs, 75.0, false, None);
         assert_eq!(s, 2);
         assert_eq!(e, 10);
         assert_eq!(trimmed[0], "ATGCATGC");
@@ -125,10 +126,24 @@ mod tests {
             "-ATGCATGCATGC".to_string(),
         ];
         // start is 1, so 1 % 3 = 1 -> adjust forward by 2 to index 3
-        let (trimmed, _, (s, e)) = trim_external(&seqs, 50.0, true);
+        let (trimmed, _, (s, e)) = trim_external(&seqs, 50.0, true, None);
         assert_eq!(s, 3);
         assert_eq!(e, 12);
         assert_eq!(trimmed[0], "GCATGCATG");
         assert_eq!(trimmed[0].len() % 3, 0);
+    }
+
+    #[test]
+    fn codon_snapping_uses_the_input_frame_after_column_removal() {
+        // Input column 1 was removed earlier, so local column 1 is input column 2.
+        let seqs = vec![
+            "AGCATGCATGC".to_string(),
+            "-GCATGCATGC".to_string(),
+            "-GCATGCATGC".to_string(),
+        ];
+        let input_columns = vec![0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let (trimmed, _, (s, e)) = trim_external(&seqs, 50.0, true, Some(&input_columns));
+        assert_eq!((s, e), (2, 11));
+        assert_eq!(trimmed[0], "CATGCATGC");
     }
 }

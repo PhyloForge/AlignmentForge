@@ -28,9 +28,7 @@ use state::AlignmentCache;
 pub fn run() {
     tauri::Builder::default()
         .manage(AlignmentCache::new())
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             scan_directory,
             get_alignment,
